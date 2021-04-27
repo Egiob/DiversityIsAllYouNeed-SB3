@@ -36,6 +36,14 @@ class ReplayBufferSamples(NamedTuple):
     dones: th.Tensor
     rewards: th.Tensor
 
+class ReplayBufferSamplesZ(NamedTuple):
+    observations: th.Tensor
+    actions: th.Tensor
+    next_observations: th.Tensor
+    dones: th.Tensor
+    rewards: th.Tensor
+    zs : th.Tensor
+
 
 class RolloutReturn(NamedTuple):
     episode_reward: float
@@ -43,6 +51,12 @@ class RolloutReturn(NamedTuple):
     n_episodes: int
     continue_training: bool
 
+class RolloutReturnZ(NamedTuple):
+    episode_reward: float
+    episode_timesteps: int
+    n_episodes: int
+    continue_training: bool
+    z: th.Tensor
 
 class TrainFrequencyUnit(Enum):
     STEP = "step"
