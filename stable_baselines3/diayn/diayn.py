@@ -20,20 +20,12 @@ from stable_baselines3.diayn.disc import Discriminator
 
 class DIAYN(SAC):
     """
-    Soft Actor-Critic (SAC)
-    Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
-    This implementation borrows code from original implementation (https://github.com/haarnoja/sac)
-    from OpenAI Spinning Up (https://github.com/openai/spinningup), from the softlearning repo
-    (https://github.com/rail-berkeley/softlearning/)
-    and from Stable Baselines (https://github.com/hill-a/stable-baselines)
-    Paper: https://arxiv.org/abs/1801.01290
-    Introduction to SAC: https://spinningup.openai.com/en/latest/algorithms/sac.html
-
-    Note: we use double q target and not value target as discussed
-    in https://github.com/hill-a/stable-baselines/issues/270
+    Diversity is All You Need
+    Built on top of SAC
 
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
+    :param prior: The prior distribution for the skills p(z), usually uniform categorical
     :param learning_rate: learning rate for adam optimizer,
         the same learning rate will be used for all networks (Q-Values, Actor and Value function)
         it can be a function of the current progress remaining (from 1 to 0)
@@ -137,6 +129,9 @@ class DIAYN(SAC):
         self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer = None
+        
+        #Initialization of the discriminator
+        #TODO : hidden_sizes in params
         hidden_sizes = [30, 30]
         self.discriminator = Discriminator(env, prior, hidden_sizes)
         self.log_p_z = prior.logits
@@ -144,9 +139,10 @@ class DIAYN(SAC):
         if _init_setup_model:
             self._setup_model()
 
-
     def _setup_model(self) -> None:
-        super(SAC, self)._setup_model()
+        
+        super(DIAYN, self)._setup_model()
+        #ReplayBufferZ replaces ReplayBuffer while including z
         self.replay_buffer = ReplayBufferZ(
             self.buffer_size,
             self.observation_space,
@@ -154,40 +150,7 @@ class DIAYN(SAC):
             self.device,
             optimize_memory_usage=self.optimize_memory_usage,
         )
-        self._create_aliases()
-        # Target entropy is used when learning the entropy coefficient
-        if self.target_entropy == "auto":
-            # automatically set target entropy if needed
-            self.target_entropy = -np.prod(self.env.action_space.shape).astype(np.float32)
-        else:
-            # Force conversion
-            # this will also throw an error for unexpected string
-            self.target_entropy = float(self.target_entropy)
 
-        # The entropy coefficient or entropy can be learned automatically
-        # see Automating Entropy Adjustment for Maximum Entropy RL section
-        # of https://arxiv.org/abs/1812.05905
-        if isinstance(self.ent_coef, str) and self.ent_coef.startswith("auto"):
-            # Default initial value of ent_coef when learned
-            init_value = 1.0
-            if "_" in self.ent_coef:
-                init_value = float(self.ent_coef.split("_")[1])
-                assert init_value > 0.0, "The initial value of ent_coef must be greater than 0"
-
-            # Note: we optimize the log of the entropy coeff which is slightly different from the paper
-            # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
-            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
-            self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
-        else:
-            # Force conversion to float
-            # this will throw an error if a malformed string (different from 'auto')
-            # is passed
-            self.ent_coef_tensor = th.tensor(float(self.ent_coef)).to(self.device)
-
-    def _create_aliases(self) -> None:
-        self.actor = self.policy.actor
-        self.critic = self.policy.critic
-        self.critic_target = self.policy.critic_target
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Update optimizers learning rate
@@ -246,7 +209,10 @@ class DIAYN(SAC):
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+
+            obs = th.cat([replay_data.observations, replay_data.zs],dim=1)
+            ##TODO adapt size of critic to take z into account
+            current_q_values = self.critic(obs, replay_data.actions)
 
             # Compute critic loss
             critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
@@ -400,6 +366,7 @@ class DIAYN(SAC):
 
         while should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
             done = False
+            #we separe true rewards from self created diayn rewards
             true_episode_reward, episode_timesteps = 0.0, 0
             diayn_episode_reward = 0.0
             while not done:
@@ -413,7 +380,7 @@ class DIAYN(SAC):
 
                 # Rescale and perform action
                 new_obs, true_reward, done, infos = env.step(action)
-            
+                #diayn reward computed from discriminator
                 diayn_reward = self.discriminator(new_obs).detach().cpu()[:,:,z] - self.log_p_z[z]
                 self.num_timesteps += 1
                 episode_timesteps += 1
@@ -423,7 +390,7 @@ class DIAYN(SAC):
                 callback.update_locals(locals())
                 # Only stop training if return value is False, not when it is None.
                 if callback.on_step() is False:
-                    return RolloutReturn(0.0, num_collected_steps, num_collected_episodes, continue_training=False)
+                    return RolloutReturnZ(0.0, num_collected_steps, num_collected_episodes, continue_training=False,z=z)
 
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
@@ -461,7 +428,7 @@ class DIAYN(SAC):
 
         callback.on_rollout_end()
 
-        return RolloutReturnZ(diayn_mean_reward, num_collected_steps, num_collected_episodes, continue_training, z)
+        return RolloutReturnZ(diayn_mean_reward, num_collected_steps, num_collected_episodes, continue_training, z=z)
 
     def _store_transition(
         self,
