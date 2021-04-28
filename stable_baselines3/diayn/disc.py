@@ -54,10 +54,10 @@ class NeuralNetwork(nn.Sequential):
 class Discriminator(nn.Module):
 
     """Estimate log p(z | s)."""
-    def __init__(self, env, prior, hidden_sizes, **kwargs):
+    def __init__(self, env, prior, hidden_sizes, device = 'auto', **kwargs):
         
         super(Discriminator, self).__init__()
-        self.device = 'cuda'
+        self.device = device
         in_size = env.observation_space.shape[0]
         out_size = prior.param_shape[0] if prior.param_shape else 1
         self.network = NeuralNetwork(in_size, out_size, hidden_sizes, **kwargs).to(self.device)

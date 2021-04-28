@@ -10,7 +10,7 @@ from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutReturnZ, Schedule, TrainFreq, TrainFrequencyUnit
 from stable_baselines3.common.utils import safe_mean, should_collect_more_steps, polyak_update
-from stable_baselines3.sac.policies import SACPolicy
+from stable_baselines3.diayn.policies import DIAYNPolicy
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.callbacks import BaseCallback
@@ -68,7 +68,7 @@ class DIAYN(SAC):
 
     def __init__(
         self,
-        policy: Union[str, Type[SACPolicy]],
+        policy: Union[str, Type[DIAYNPolicy]],
         env: Union[GymEnv, str],
         prior : th.distributions,
         learning_rate: Union[float, Schedule] = 3e-4,
@@ -99,7 +99,7 @@ class DIAYN(SAC):
         super(SAC, self).__init__(
             policy,
             env,
-            SACPolicy,
+            DIAYNPolicy,
             learning_rate,
             buffer_size,
             learning_starts,
@@ -133,15 +133,16 @@ class DIAYN(SAC):
         #Initialization of the discriminator
         #TODO : hidden_sizes in params
         hidden_sizes = [30, 30]
-        self.discriminator = Discriminator(env, prior, hidden_sizes)
+        self.discriminator = Discriminator(env, prior, hidden_sizes, device=self.device)
         self.log_p_z = prior.logits
         self.prior = prior
         if _init_setup_model:
             self._setup_model()
 
     def _setup_model(self) -> None:
-        
-        super(DIAYN, self)._setup_model()
+        #not calling super() because we change the way policy is instantiated
+        self._setup_lr_schedule()
+        self.set_random_seed(self.seed)
         #ReplayBufferZ replaces ReplayBuffer while including z
         self.replay_buffer = ReplayBufferZ(
             self.buffer_size,
@@ -151,9 +152,50 @@ class DIAYN(SAC):
             optimize_memory_usage=self.optimize_memory_usage,
         )
 
+        self.policy = self.policy_class(  # pytype:disable=not-instantiable
+            self.observation_space,
+            self.action_space,
+            self.lr_schedule,
+            self.prior,
+            **self.policy_kwargs,  # pytype:disable=not-instantiable
+        )
+        self.policy = self.policy.to(self.device)
+        self._create_aliases()
+        self._convert_train_freq()
+        # Target entropy is used when learning the entropy coefficient
+        if self.target_entropy == "auto":
+            # automatically set target entropy if needed
+            self.target_entropy = -np.prod(self.env.action_space.shape).astype(np.float32)
+        else:
+            # Force conversion
+            # this will also throw an error for unexpected string
+            self.target_entropy = float(self.target_entropy)
+
+        # The entropy coefficient or entropy can be learned automatically
+        # see Automating Entropy Adjustment for Maximum Entropy RL section
+        # of https://arxiv.org/abs/1812.05905
+        if isinstance(self.ent_coef, str) and self.ent_coef.startswith("auto"):
+            # Default initial value of ent_coef when learned
+            init_value = 1.0
+            if "_" in self.ent_coef:
+                init_value = float(self.ent_coef.split("_")[1])
+                assert init_value > 0.0, "The initial value of ent_coef must be greater than 0"
+
+            # Note: we optimize the log of the entropy coeff which is slightly different from the paper
+            # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
+            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
+            self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
+        else:
+            # Force conversion to float
+            # this will throw an error if a malformed string (different from 'auto')
+            # is passed
+            self.ent_coef_tensor = th.tensor(float(self.ent_coef)).to(self.device)
+
+
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Update optimizers learning rate
+        
         optimizers = [self.actor.optimizer, self.critic.optimizer]
         if self.ent_coef_optimizer is not None:
             optimizers += [self.ent_coef_optimizer]
@@ -173,7 +215,8 @@ class DIAYN(SAC):
                 self.actor.reset_noise()
 
             # Action by the current actor for the sampled state
-            actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
+            obs = th.cat([replay_data.observations, replay_data.zs],dim=1)
+            actions_pi, log_prob = self.actor.action_log_prob(obs)
             log_prob = log_prob.reshape(-1, 1)
 
             ent_coef_loss = None
@@ -198,7 +241,8 @@ class DIAYN(SAC):
 
             with th.no_grad():
                 # Select action according to policy
-                next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+                new_obs = th.cat([replay_data.next_observations, replay_data.zs],dim=1)
+                next_actions, next_log_prob = self.actor.action_log_prob(new_obs)
                 # Compute the next Q values: min over all critics targets
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
@@ -210,9 +254,10 @@ class DIAYN(SAC):
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
 
-            obs = th.cat([replay_data.observations, replay_data.zs],dim=1)
-            ##TODO adapt size of critic to take z into account
-            current_q_values = self.critic(obs, replay_data.actions)
+            
+
+            
+            current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
             critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
@@ -239,10 +284,9 @@ class DIAYN(SAC):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-            device= 'cuda'
-            log_q_phi = self.discriminator(replay_data.next_observations.to(device)).to(device)
-            #z = self.prior.sample([log_q_phi.shape[0],]).to(device)
-            z = replay_data.zs.flatten().to(device)
+            log_q_phi = self.discriminator(replay_data.next_observations.to(self.device)).to(self.device)
+            #z = self.prior.sample([log_q_phi.shape[0],]).to(self.device)
+            z = replay_data.zs.flatten().to(self.device)
             discriminator_loss = th.nn.NLLLoss()(log_q_phi, z)
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
@@ -376,7 +420,7 @@ class DIAYN(SAC):
                     self.actor.reset_noise()
 
                 # Select action randomly or according to policy
-                action, buffer_action = self._sample_action(learning_starts, action_noise)
+                action, buffer_action = self._sample_action(learning_starts, z, action_noise)
 
                 # Rescale and perform action
                 new_obs, true_reward, done, infos = env.step(action)
@@ -479,4 +523,48 @@ class DIAYN(SAC):
         if self._vec_normalize_env is not None:
             self._last_original_obs = new_obs_
 
+    def _sample_action(
+        self, learning_starts: int, z: th.Tensor, action_noise: Optional[ActionNoise] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Sample an action according to the exploration policy.
+        This is either done by sampling the probability distribution of the policy,
+        or sampling a random action (from a uniform distribution over the action space)
+        or by adding noise to the deterministic output.
+
+        :param action_noise: Action noise that will be used for exploration
+            Required for deterministic policy (e.g. TD3). This can also be used
+            in addition to the stochastic policy for SAC.
+        :param learning_starts: Number of steps before learning for the warm-up phase.
+        :return: action to take in the environment
+            and scaled action that will be stored in the replay buffer.
+            The two differs when the action space is not normalized (bounds are not [-1, 1]).
+        """
+        # Select action randomly or according to policy
+        if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
+            # Warmup phase
+            unscaled_action = np.array([self.action_space.sample()])
+        else:
+            # Note: when using continuous actions,
+            # we assume that the policy uses tanh to scale the action
+            # We use non-deterministic action in the case of SAC, for TD3, it does not matter
+            obs = np.concatenate([self._last_obs,z.cpu().numpy()[None,None]],axis=1)
+            unscaled_action, _ = self.predict(obs, deterministic=False)
+
+        # Rescale the action from [low, high] to [-1, 1]
+        if isinstance(self.action_space, gym.spaces.Box):
+            scaled_action = self.policy.scale_action(unscaled_action)
+
+            # Add noise to the action (improve exploration)
+            if action_noise is not None:
+                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
+
+            # We store the scaled action in the buffer
+            buffer_action = scaled_action
+            action = self.policy.unscale_action(scaled_action)
+        else:
+            # Discrete case, no need to normalize or clip
+            buffer_action = unscaled_action
+            action = buffer_action
+        return action, buffer_action
     
