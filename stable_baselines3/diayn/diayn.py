@@ -407,7 +407,6 @@ class DIAYN(SAC):
 
         callback.on_rollout_start()
         continue_training = True
-
         while should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
             done = False
             #we separe true rewards from self created diayn rewards
@@ -424,8 +423,10 @@ class DIAYN(SAC):
 
                 # Rescale and perform action
                 new_obs, true_reward, done, infos = env.step(action)
+                done = done[0]
+
                 #diayn reward computed from discriminator
-                diayn_reward = self.discriminator(new_obs).detach().cpu()[:,:,z] - self.log_p_z[z]
+                diayn_reward = (self.discriminator(new_obs).detach().cpu()[:,:,z] - self.log_p_z[z])
                 self.num_timesteps += 1
                 episode_timesteps += 1
                 num_collected_steps += 1
@@ -438,6 +439,8 @@ class DIAYN(SAC):
 
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
+
+
                 # Retrieve reward and episode length if using Monitor wrapper
                 self._update_info_buffer(infos, done)
 
@@ -451,7 +454,7 @@ class DIAYN(SAC):
                 # For SAC/TD3, the update is done as the same time as the gradient update
                 # see https://github.com/hill-a/stable-baselines/issues/900
                 self._on_step()
-
+                
                 if not should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
                     break
 
@@ -471,7 +474,6 @@ class DIAYN(SAC):
         diayn_mean_reward = np.mean(diayn_episode_rewards) if num_collected_episodes > 0 else 0.0
 
         callback.on_rollout_end()
-
         return RolloutReturnZ(diayn_mean_reward, num_collected_steps, num_collected_episodes, continue_training, z=z)
 
     def _store_transition(
