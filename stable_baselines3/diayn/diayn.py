@@ -288,7 +288,7 @@ class DIAYN(SAC):
             log_q_phi = self.discriminator(replay_data.next_observations.to(self.device)).to(self.device)
             #z = self.prior.sample([log_q_phi.shape[0],]).to(self.device)
             z = replay_data.zs.to(self.device)
-            print(log_q_phi)
+            #print(log_q_phi)
             discriminator_loss = th.nn.NLLLoss()(log_q_phi, z.argmax(dim=1))
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
