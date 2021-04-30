@@ -148,6 +148,7 @@ class DIAYN(SAC):
             self.buffer_size,
             self.observation_space,
             self.action_space,
+            self.prior,
             self.device,
             optimize_memory_usage=self.optimize_memory_usage,
         )
@@ -286,8 +287,9 @@ class DIAYN(SAC):
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
             log_q_phi = self.discriminator(replay_data.next_observations.to(self.device)).to(self.device)
             #z = self.prior.sample([log_q_phi.shape[0],]).to(self.device)
-            z = replay_data.zs.flatten().to(self.device)
-            discriminator_loss = th.nn.NLLLoss()(log_q_phi, z)
+            z = replay_data.zs.to(self.device)
+            print(log_q_phi)
+            discriminator_loss = th.nn.NLLLoss()(log_q_phi, z.argmax(dim=1))
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
             discriminator_loss.backward()
@@ -426,7 +428,7 @@ class DIAYN(SAC):
                 done = done[0]
 
                 #diayn reward computed from discriminator
-                diayn_reward = (self.discriminator(new_obs).detach().cpu()[:,:,z] - self.log_p_z[z])
+                diayn_reward = (self.discriminator(new_obs).detach().cpu()[:,:,z.argmax()] - self.log_p_z[z.argmax()])
                 self.num_timesteps += 1
                 episode_timesteps += 1
                 num_collected_steps += 1
@@ -550,7 +552,7 @@ class DIAYN(SAC):
             # Note: when using continuous actions,
             # we assume that the policy uses tanh to scale the action
             # We use non-deterministic action in the case of SAC, for TD3, it does not matter
-            obs = np.concatenate([self._last_obs,z.cpu().numpy()[None,None]],axis=1)
+            obs = np.concatenate([self._last_obs,z.cpu().numpy()[None]],axis=1)
             unscaled_action, _ = self.predict(obs, deterministic=False)
 
         # Rescale the action from [low, high] to [-1, 1]

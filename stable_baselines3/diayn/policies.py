@@ -55,7 +55,7 @@ class Actor(BasePolicy):
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         net_arch: List[int],
-        z : th.tensor,
+        prior : th.distributions,
         features_extractor: nn.Module,
         features_dim: int,
         activation_fn: Type[nn.Module] = nn.ReLU,
@@ -87,10 +87,11 @@ class Actor(BasePolicy):
         self.use_expln = use_expln
         self.full_std = full_std
         self.clip_mean = clip_mean
-        self.z = z
+        self.prior = prior
         action_dim = get_action_dim(self.action_space)
+        z_size = prior.event_shape[0]
         #features_dim + 1 for taking the skill dimension into account
-        latent_pi_net = create_mlp(features_dim + 1, -1, net_arch, activation_fn)
+        latent_pi_net = create_mlp(features_dim + z_size, -1, net_arch, activation_fn)
         self.latent_pi = nn.Sequential(*latent_pi_net)
         last_layer_dim = net_arch[-1] if len(net_arch) > 0 else features_dim
 
@@ -237,7 +238,7 @@ class DIAYNPolicy(BasePolicy):
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
-        z: th.Tensor,
+        prior: th.distributions,
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         use_sde: bool = False,
@@ -270,7 +271,7 @@ class DIAYNPolicy(BasePolicy):
                 net_arch = []
 
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
-        self.z = z
+        self.prior = prior
         self.net_arch = net_arch
         self.activation_fn = activation_fn
         self.net_args = {
@@ -287,7 +288,7 @@ class DIAYNPolicy(BasePolicy):
             "sde_net_arch": sde_net_arch,
             "use_expln": use_expln,
             "clip_mean": clip_mean,
-            "z": z,
+            "prior": prior,
         }
     
         self.actor_kwargs.update(sde_kwargs)
@@ -407,7 +408,8 @@ class DIAYNPolicy(BasePolicy):
         #vectorized_env = is_vectorized_observation(observation, self.observation_space)
         vectorized_env = True
         obs_shape = list(self.observation_space.shape)
-        obs_shape[0] +=1 #for z dimension
+        z_size = self.prior.event_shape[0]
+        obs_shape[0] += z_size #for z dimension
         observation = observation.reshape([-1,] + obs_shape ) 
 
         observation = th.as_tensor(observation).to(self.device)

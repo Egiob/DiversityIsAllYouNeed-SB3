@@ -277,6 +277,7 @@ class ReplayBufferZ(BaseBuffer):
         buffer_size: int,
         observation_space: spaces.Space,
         action_space: spaces.Space,
+        prior : th.distributions,
         device: Union[th.device, str] = "cpu",
         n_envs: int = 1,
         optimize_memory_usage: bool = False,
@@ -299,7 +300,9 @@ class ReplayBufferZ(BaseBuffer):
         self.actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=action_space.dtype)
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-        self.zs = th.zeros((self.buffer_size,1), dtype=th.long)
+        self.prior = prior
+        z_size = self.prior.event_shape
+        self.zs = th.zeros((self.buffer_size, z_size[0]), dtype=th.long)
 
         if psutil is not None:
             total_memory_usage = self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.dones.nbytes
@@ -326,7 +329,7 @@ class ReplayBufferZ(BaseBuffer):
         self.actions[self.pos] = np.array(action).copy()
         self.rewards[self.pos] = np.array(reward).copy()
         self.dones[self.pos] = np.array(done).copy()
-        self.zs[self.pos] = z.clone()
+        self.zs[self.pos] = z.clone().detach()
 
         self.pos += 1
         if self.pos == self.buffer_size:
