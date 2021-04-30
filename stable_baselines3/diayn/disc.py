@@ -66,7 +66,7 @@ class Discriminator(nn.Module):
 
     def forward(self, s):
         if not isinstance(s, th.Tensor):
-            s = th.Tensor([s]).to(self.device)
+            s = th.Tensor(s).to(self.device)
         if self.out_size == 1:
             print(self.network(s).device)
             return th.log(th.sigmoid(self.network(s)))

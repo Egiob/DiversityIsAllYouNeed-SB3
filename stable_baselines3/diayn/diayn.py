@@ -217,6 +217,7 @@ class DIAYN(SAC):
 
             # Action by the current actor for the sampled state
             obs = th.cat([replay_data.observations, replay_data.zs],dim=1)
+            #print(obs)
             actions_pi, log_prob = self.actor.action_log_prob(obs)
             log_prob = log_prob.reshape(-1, 1)
 
@@ -245,7 +246,7 @@ class DIAYN(SAC):
                 new_obs = th.cat([replay_data.next_observations, replay_data.zs],dim=1)
                 next_actions, next_log_prob = self.actor.action_log_prob(new_obs)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                next_q_values = th.cat(self.critic_target(new_obs, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
                 # add entropy term
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
@@ -258,7 +259,7 @@ class DIAYN(SAC):
             
 
             
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+            current_q_values = self.critic(obs, replay_data.actions)
 
             # Compute critic loss
             critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
@@ -272,7 +273,7 @@ class DIAYN(SAC):
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Mean over all critic networks
-            q_values_pi = th.cat(self.critic.forward(replay_data.observations, actions_pi), dim=1)
+            q_values_pi = th.cat(self.critic.forward(obs, actions_pi), dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
@@ -297,7 +298,7 @@ class DIAYN(SAC):
             
 
         self._n_updates += gradient_steps
-
+        #print("train")
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         logger.record("train/ent_coef", np.mean(ent_coefs))
         logger.record("train/actor_loss", np.mean(actor_losses))
@@ -339,10 +340,9 @@ class DIAYN(SAC):
                 log_interval=log_interval,
                 z = z,
             )
-
             if rollout.continue_training is False:
                 break
-
+                
             if self.num_timesteps > 0 and self.num_timesteps > self.learning_starts:
                 # If no `gradient_steps` is specified,
                 # do as many gradients steps as steps performed during the rollout
@@ -428,7 +428,9 @@ class DIAYN(SAC):
                 done = done[0]
 
                 #diayn reward computed from discriminator
-                diayn_reward = (self.discriminator(new_obs).detach().cpu()[:,:,z.argmax()] - self.log_p_z[z.argmax()])
+                
+                log_q_phi = self.discriminator(new_obs).detach().cpu()[:,z.argmax()]
+                diayn_reward = (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
                 self.num_timesteps += 1
                 episode_timesteps += 1
                 num_collected_steps += 1
@@ -441,7 +443,6 @@ class DIAYN(SAC):
 
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
-
 
                 # Retrieve reward and episode length if using Monitor wrapper
                 self._update_info_buffer(infos, done)
@@ -474,7 +475,6 @@ class DIAYN(SAC):
                     self._dump_logs()
 
         diayn_mean_reward = np.mean(diayn_episode_rewards) if num_collected_episodes > 0 else 0.0
-
         callback.on_rollout_end()
         return RolloutReturnZ(diayn_mean_reward, num_collected_steps, num_collected_episodes, continue_training, z=z)
 
