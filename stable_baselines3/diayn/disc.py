@@ -68,6 +68,6 @@ class Discriminator(nn.Module):
         if not isinstance(s, th.Tensor):
             s = th.Tensor(s).to(self.device)
         if self.out_size == 1:
-            print(self.network(s).device)
+            #print(self.network(s).device)
             return th.log(th.sigmoid(self.network(s)))
         return F.log_softmax(self.network(s), dim=1)
