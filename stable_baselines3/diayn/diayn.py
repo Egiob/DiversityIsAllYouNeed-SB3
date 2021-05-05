@@ -445,7 +445,6 @@ class DIAYN(SAC):
 
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
-                #print(infos)
                 # Retrieve reward and episode length if using Monitor wrapper
                 self._update_info_buffer(infos, done)
 
