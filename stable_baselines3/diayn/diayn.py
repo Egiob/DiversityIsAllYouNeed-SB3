@@ -96,6 +96,7 @@ class DIAYN(SAC):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        disc_on : Union[list, str] = 'all'
     ):
 
         super(SAC, self).__init__(
@@ -135,7 +136,15 @@ class DIAYN(SAC):
         #Initialization of the discriminator
         #TODO : hidden_sizes in params
         hidden_sizes = [30, 30]
-        self.discriminator = Discriminator(env, prior, hidden_sizes, device=self.device)
+        if disc_on == 'all':
+            self.disc_on = ...
+            disc_obs_shape = env.observation_space.shape[0]
+        elif isinstance(disc_on, list):
+            disc_obs_shape = env.observation_space.shape[0]
+            assert min(disc_on)>=0 and max(disc_on) < disc_obs_shape
+            disc_obs_shape = len(disc_on)
+            self.disc_on = disc_on
+        self.discriminator = Discriminator(disc_obs_shape, prior, hidden_sizes, device=self.device)
         self.log_p_z = prior.logits
         self.prior = prior
         if _init_setup_model:
@@ -288,7 +297,9 @@ class DIAYN(SAC):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-            log_q_phi = self.discriminator(replay_data.next_observations.to(self.device)).to(self.device)
+            #print(replay_data.next_observations)
+            disc_obs = replay_data.next_observations[:,self.disc_on]
+            log_q_phi = self.discriminator(disc_obs.to(self.device)).to(self.device)
             #z = self.prior.sample([log_q_phi.shape[0],]).to(self.device)
             z = replay_data.zs.to(self.device)
             #print(log_q_phi)
@@ -349,6 +360,7 @@ class DIAYN(SAC):
                 # If no `gradient_steps` is specified,
                 # do as many gradients steps as steps performed during the rollout
                 gradient_steps = self.gradient_steps if self.gradient_steps > 0 else rollout.episode_timesteps
+                #print(self.num_timesteps)
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
 
         callback.on_training_end()
@@ -430,8 +442,8 @@ class DIAYN(SAC):
                 done = done[0]
 
                 #diayn reward computed from discriminator
-                
-                log_q_phi = self.discriminator(new_obs).detach().cpu()[:,z.argmax()]
+                #print(new_obs[:,self.disc_on])
+                log_q_phi = self.discriminator(new_obs[:,self.disc_on]).detach().cpu()[:,z.argmax()]
                 diayn_reward = (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
                 self.num_timesteps += 1
                 episode_timesteps += 1
@@ -645,9 +657,11 @@ class DIAYN(SAC):
         # put other pytorch variables back in place
         if pytorch_variables is not None:
             for name in pytorch_variables:
-                # Set the data attribute directly to avoid issue when using optimizers
-                # See https://github.com/DLR-RM/stable-baselines3/issues/391
-                recursive_setattr(model, name + ".data", pytorch_variables[name].data)
+                if pytorch_variables[name] is not None:
+                    
+                    # Set the data attribute directly to avoid issue when using optimizers
+                    # See https://github.com/DLR-RM/stable-baselines3/issues/391
+                    recursive_setattr(model, name + ".data", pytorch_variables[name].data)
 
         # Sample gSDE exploration matrix, so it uses the right device
         # see issue #44
