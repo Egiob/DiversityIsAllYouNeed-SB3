@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
-
+import time
 import gym
 import numpy as np
 import torch as th
@@ -96,7 +96,9 @@ class DIAYN(SAC):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
-        disc_on : Union[list, str] = 'all'
+        disc_on : Union[list, str] = 'all',
+        combined_rewards : bool = False,
+        beta: float = 0.01
     ):
 
         super(SAC, self).__init__(
@@ -147,6 +149,8 @@ class DIAYN(SAC):
         self.discriminator = Discriminator(disc_obs_shape, prior, hidden_sizes, device=self.device)
         self.log_p_z = prior.logits
         self.prior = prior
+        self.combined_rewards = combined_rewards
+        self.beta = beta
         if _init_setup_model:
             self._setup_model()
 
@@ -412,6 +416,7 @@ class DIAYN(SAC):
         :return:
         """
         diayn_episode_rewards, total_timesteps = [], []
+        observed_episode_rewards = []
         num_collected_steps, num_collected_episodes = 0, 0
 
         assert isinstance(env, VecEnv), "You must pass a VecEnv"
@@ -428,6 +433,7 @@ class DIAYN(SAC):
             #we separe true rewards from self created diayn rewards
             true_episode_reward, episode_timesteps = 0.0, 0
             diayn_episode_reward = 0.0
+            observed_episode_reward = 0.0
             while not done:
 
                 if self.use_sde and self.sde_sample_freq > 0 and num_collected_steps % self.sde_sample_freq == 0:
@@ -444,7 +450,13 @@ class DIAYN(SAC):
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
                 log_q_phi = self.discriminator(new_obs[:,self.disc_on]).detach().cpu()[:,z.argmax()]
-                diayn_reward = (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
+                diayn_reward = self.beta * (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
+                if self.combined_rewards:
+                    reward = diayn_reward + true_reward
+                else:
+                    reward = diayn_reward
+
+                
                 self.num_timesteps += 1
                 episode_timesteps += 1
                 num_collected_steps += 1
@@ -457,11 +469,20 @@ class DIAYN(SAC):
 
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
+                observed_episode_reward += reward
                 # Retrieve reward and episode length if using Monitor wrapper
+                for idx, info in enumerate(infos):
+                    maybe_ep_info = info.get("episode")
+                    if maybe_ep_info:
+                        z_idx = np.argmax(z)
+                        for i in range(self.prior.event_shape[0]):
+                            maybe_ep_info[f'r_{i}'] = 0.
+                        maybe_ep_info[f'r_{z_idx}'] = diayn_episode_reward[0]
+                        maybe_ep_info['r'] = observed_episode_reward[0]
                 self._update_info_buffer(infos, done)
 
                 # Store data in replay buffer (normalized action and unnormalized observation)
-                self._store_transition(replay_buffer, buffer_action, new_obs, diayn_reward, done, infos, z)
+                self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z)
 
                 self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
 
@@ -668,3 +689,27 @@ class DIAYN(SAC):
         if model.use_sde:
             model.policy.reset_noise()  # pytype: disable=attribute-error
         return model
+
+
+    def _dump_logs(self) -> None:
+        """
+        Write log.
+        """
+        fps = int(self.num_timesteps / (time.time() - self.start_time))
+        logger.record("time/episodes", self._episode_num, exclude="tensorboard")
+        if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
+            logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
+            logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
+            for i in range(self.prior.event_shape[0]):
+                logger.record(f"diayn/ep_diayn_reward_mean_skill_{i}",
+                               safe_mean([ep_info.get(f"r_{i}") for ep_info in self.ep_info_buffer]) )
+        logger.record("time/fps", fps)
+        logger.record("time/time_elapsed", int(time.time() - self.start_time), exclude="tensorboard")
+        logger.record("time/total timesteps", self.num_timesteps, exclude="tensorboard")
+        if self.use_sde:
+            logger.record("train/std", (self.actor.get_std()).mean().item())
+
+        if len(self.ep_success_buffer) > 0:
+            logger.record("rollout/success rate", safe_mean(self.ep_success_buffer))
+        # Pass the number of timesteps for tensorboard
+        logger.dump(step=self.num_timesteps)
