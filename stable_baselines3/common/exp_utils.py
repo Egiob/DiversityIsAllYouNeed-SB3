@@ -5,6 +5,20 @@ from stable_baselines3.common.vec_env import VecVideoRecorder, DummyVecEnv
 from stable_baselines3 import DIAYN
 import gym
 
+
+def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_steps, disc_on, seed, ent_coef, combined_rewards, beta):
+    train_freq_name = "".join([str(x)[:2] for x in train_freq])
+    disc_on_name = "".join([str(x) for x in disc_on])
+    env_name = env_id.split(':')[-1].split('-')[0].lower()
+    run_name = f"{env_name}__skills-{n_skills}__disc-{disc_on_name}__tf-{train_freq_name}__gs-{gradient_steps}__ent-{ent_coef}__start-{t_start}__end-{t_end:.2}__s-{seed}"
+    if combined_rewards:
+        run_name = f"{env_name}__skills-{n_skills}__disc-{disc_on_name}__tf-{train_freq_name}__gs-{gradient_steps}__ent-{ent_coef}__beta-{beta:.2}__start-{t_start}__end-{t_end:.2}__s-{seed}"
+    log_path = "./logs/"+ env_name  + '/' + combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + "__".join(run_name.split("__")[2:])
+    save_path = "./models/" + env_name + '/' +combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + run_name
+    video_path = "./video/" + env_name + '/' +combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + run_name
+    
+    return log_path, save_path, video_path
+
 def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions=True):
     states = np.zeros((episode_length, *model.observation_space.shape))
     actions = np.zeros((episode_length, *model.action_space.shape))
@@ -56,7 +70,7 @@ def compute_jsd(states_1, states_2, model, bins=50, states=True):
     return jsd_l
 
 
-def record_skills(env_id, model, directory, name_prefix, video_length=400):
+def record_skills(env_id, model_path, directory, name_prefix="", video_length=400):
 
     env = DummyVecEnv([lambda: gym.make(env_id)])
     model = DIAYN.load(model, env)
