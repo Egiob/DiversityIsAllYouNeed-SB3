@@ -73,7 +73,7 @@ def compute_jsd(states_1, states_2, model, bins=50, states=True):
 def record_skills(env_id, model_path, directory, name_prefix="", video_length=400):
 
     env = DummyVecEnv([lambda: gym.make(env_id)])
-    model = DIAYN.load(model, env)
+    model = DIAYN.load(model_path, env)
     prior = model.prior
     k=0
     for z in prior.enumerate_support():

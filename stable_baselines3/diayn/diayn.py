@@ -453,6 +453,7 @@ class DIAYN(SAC):
                 diayn_reward = self.beta * (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
                 if self.combined_rewards:
                     reward = diayn_reward + true_reward
+                    print(diayn_reward, true_reward)
                 else:
                     reward = diayn_reward
 
