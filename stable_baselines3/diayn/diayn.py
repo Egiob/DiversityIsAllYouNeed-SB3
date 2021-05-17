@@ -450,9 +450,9 @@ class DIAYN(SAC):
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
                 log_q_phi = self.discriminator(new_obs[:,self.disc_on]).detach().cpu()[:,z.argmax()]
-                diayn_reward = self.beta * (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
+                diayn_reward =  (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
                 if self.combined_rewards:
-                    reward = diayn_reward + true_reward
+                    reward = self.beta * diayn_reward + true_reward
                     print(diayn_reward, true_reward)
                 else:
                     reward = diayn_reward
