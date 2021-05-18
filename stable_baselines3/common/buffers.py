@@ -302,8 +302,8 @@ class ReplayBufferZ(BaseBuffer):
         self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.prior = prior
         z_size = self.prior.event_shape
-        self.zs = th.zeros((self.buffer_size, z_size[0]), dtype=th.long)
-
+        #self.zs = th.zeros((self.buffer_size, z_size[0]), dtype=th.long)
+        self.zs = np.zeros((self.buffer_size, z_size[0]), dtype=np.float32)
         if psutil is not None:
             total_memory_usage = self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.dones.nbytes
             if self.next_observations is not None:
@@ -318,7 +318,7 @@ class ReplayBufferZ(BaseBuffer):
                     f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
                 )
 
-    def add(self, obs: np.ndarray, next_obs: np.ndarray, action: np.ndarray, reward: np.ndarray, done: np.ndarray, z:th.Tensor) -> None:
+    def add(self, obs: np.ndarray, next_obs: np.ndarray, action: np.ndarray, reward: np.ndarray, done: np.ndarray, z:np.ndarray) -> None:
         # Copy to avoid modification by reference
         self.observations[self.pos] = np.array(obs).copy()
         if self.optimize_memory_usage:
@@ -329,7 +329,7 @@ class ReplayBufferZ(BaseBuffer):
         self.actions[self.pos] = np.array(action).copy()
         self.rewards[self.pos] = np.array(reward).copy()
         self.dones[self.pos] = np.array(done).copy()
-        self.zs[self.pos] = z.clone().detach()
+        self.zs[self.pos] = np.array(z).copy()
 
         self.pos += 1
         if self.pos == self.buffer_size:

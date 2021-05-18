@@ -450,11 +450,13 @@ class DIAYN(SAC):
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
                 log_q_phi = self.discriminator(new_obs[:,self.disc_on]).detach().cpu()[:,z.argmax()]
-                diayn_reward =  (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
+                
                 if self.combined_rewards:
-                    reward = self.beta * diayn_reward + true_reward
-                    print(diayn_reward, true_reward)
+                    diayn_reward =  self.beta * (log_q_phi - self.log_p_z[z.argmax()])
+                    reward = diayn_reward + true_reward
+                    #print(diayn_reward, true_reward)
                 else:
+                    diayn_reward =  (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
                     reward = diayn_reward
 
                 
@@ -483,7 +485,8 @@ class DIAYN(SAC):
                 self._update_info_buffer(infos, done)
 
                 # Store data in replay buffer (normalized action and unnormalized observation)
-                self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z)
+                z_store = z.clone().detach().cpu().numpy()
+                self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z_store)
 
                 self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
 
@@ -521,7 +524,7 @@ class DIAYN(SAC):
         reward: np.ndarray,
         done: np.ndarray,
         infos: List[Dict[str, Any]],
-        z: th.Tensor
+        z: np.ndarray
     ) -> None:
         """
         Store transition in the replay buffer.
