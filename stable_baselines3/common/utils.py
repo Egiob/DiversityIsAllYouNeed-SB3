@@ -268,7 +268,7 @@ def is_vectorized_observation(observation: np.ndarray, observation_space: gym.sp
         )
 
 
-def safe_mean(arr: Union[np.ndarray, list, deque]) -> np.ndarray:
+def safe_mean(arr: Union[np.ndarray, list, deque], where=np._NoValue) -> np.ndarray:
     """
     Compute the mean of an array if there is at least one element.
     For empty array, return NaN. It is used for logging only.
@@ -276,7 +276,7 @@ def safe_mean(arr: Union[np.ndarray, list, deque]) -> np.ndarray:
     :param arr:
     :return:
     """
-    return np.nan if len(arr) == 0 else np.mean(arr)
+    return np.nan if len(arr) == 0 else np.mean(arr, where=where)
 
 
 def zip_strict(*iterables: Iterable) -> Iterable:

@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import time
 import gym
 import numpy as np
+from numpy.core.fromnumeric import mean
 import torch as th
 from torch.nn import functional as F
 import pathlib
@@ -147,7 +148,7 @@ class DIAYN(SAC):
             disc_obs_shape = len(disc_on)
             self.disc_on = disc_on
         self.discriminator = Discriminator(disc_obs_shape, prior, hidden_sizes, device=self.device)
-        self.log_p_z = prior.logits
+        self.log_p_z = prior.logits.detach().cpu().numpy()
         self.prior = prior
         self.combined_rewards = combined_rewards
         self.beta = beta
@@ -449,14 +450,18 @@ class DIAYN(SAC):
 
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
-                log_q_phi = self.discriminator(new_obs[:,self.disc_on]).detach().cpu()[:,z.argmax()]
+                log_q_phi = self.discriminator(new_obs[:,self.disc_on])[:,z.argmax()].detach().cpu().numpy()
                 
                 if self.combined_rewards:
-                    diayn_reward =  self.beta * (log_q_phi - self.log_p_z[z.argmax()])
-                    reward = diayn_reward + true_reward
-                    #print(diayn_reward, true_reward)
+                    if False:
+                        pass
+
+                    else:
+                        diayn_reward =  self.beta * (log_q_phi - self.log_p_z[z.argmax()])
+                        reward = diayn_reward + true_reward
+                
                 else:
-                    diayn_reward =  (log_q_phi - self.log_p_z[z.argmax()]).detach().numpy()
+                    diayn_reward =  log_q_phi - self.log_p_z[z.argmax()]
                     reward = diayn_reward
 
                 
@@ -473,15 +478,19 @@ class DIAYN(SAC):
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
                 observed_episode_reward += reward
+
                 # Retrieve reward and episode length if using Monitor wrapper
                 for idx, info in enumerate(infos):
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
                         z_idx = np.argmax(z)
                         for i in range(self.prior.event_shape[0]):
-                            maybe_ep_info[f'r_{i}'] = 0.
-                        maybe_ep_info[f'r_{z_idx}'] = diayn_episode_reward[0]
+                            maybe_ep_info[f'r_diayn_{i}'] = np.nan
+                            maybe_ep_info[f'r_true_{i}'] = np.nan
+                        maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
+                        maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
                         maybe_ep_info['r'] = observed_episode_reward[0]
+
                 self._update_info_buffer(infos, done)
 
                 # Store data in replay buffer (normalized action and unnormalized observation)
@@ -705,8 +714,20 @@ class DIAYN(SAC):
             logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
             logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
             for i in range(self.prior.event_shape[0]):
+                mean_diayn_reward = [ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer]
+
+                mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
+
                 logger.record(f"diayn/ep_diayn_reward_mean_skill_{i}",
-                               safe_mean([ep_info.get(f"r_{i}") for ep_info in self.ep_info_buffer]) )
+                              mean_diayn_reward)
+
+                mean_true_reward = [ep_info.get(f"r_true_{i}") for ep_info in self.ep_info_buffer]
+                
+                mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))  
+                         
+                logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
+                              mean_true_reward)
+
         logger.record("time/fps", fps)
         logger.record("time/time_elapsed", int(time.time() - self.start_time), exclude="tensorboard")
         logger.record("time/total timesteps", self.num_timesteps, exclude="tensorboard")
