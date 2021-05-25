@@ -4,6 +4,7 @@ from scipy.spatial.distance import jensenshannon as jsd
 from stable_baselines3.common.vec_env import VecVideoRecorder, DummyVecEnv
 from stable_baselines3 import DIAYN
 import gym
+import pandas as pd
 
 
 def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_steps, disc_on, seed, ent_coef, combined_rewards, beta):
@@ -20,20 +21,29 @@ def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_step
     return log_path, save_path, video_path
 
 def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions=True):
-    states = np.zeros((episode_length, *model.observation_space.shape))
-    actions = np.zeros((episode_length, *model.action_space.shape))
+    states = []
+    actions = []
     env = model.env
     skill = th.zeros(model.prior.event_shape)
     skill[skill_idx] = 1
-
+    env.seed(seed)
     obs = env.reset()
-    states[0] = obs.flatten()
+    states.append(obs.flatten())
     for i in range(episode_length-1):
         obs = np.concatenate([obs,skill[None,:]],axis=1)
         action, _ = model.predict(obs)
+
+        actions.append(action.flatten())
         obs, _, done, _ = env.step(action)
-        actions[i+1] = action.flatten()
-        states[i+1] = obs.flatten()
+
+        if done:
+            break
+            
+        states.append(obs.flatten())
+
+
+    states = np.reshape(states, (-1,*model.observation_space.shape))
+    actions = np.reshape(actions, (-1,*model.action_space.shape))
     if return_actions:
         return states, actions
     else:
@@ -91,3 +101,101 @@ def record_skills(env_id, model_path, directory, name_prefix="", video_length=40
         env = DummyVecEnv([lambda: gym.make(env_id)])
         video_env.close()
     env.close()
+    
+    
+def evaluate_jsd_skills(model, n_skills, episode_length, seeds, bins=50):
+    n_obs = model.observation_space.shape[0]
+    n_act = model.action_space.shape[0]
+    trajs = np.zeros((len(seeds),n_skills,episode_length,n_obs+n_act))
+    for s, seed in enumerate(seeds):
+        for i in range(n_skills):
+            seed = int(seed)
+            states_1, actions_1 = generate_trajectory(model,
+                                                  skill_idx=i,
+                                                  episode_length=episode_length,
+                                                  seed=seed,
+                                                  return_actions=True)
+            pad_scheme = [(0,episode_length-len(states_1)),(0,0)]
+            
+            states_1 = np.pad(states_1.astype(float),pad_scheme, constant_values=np.nan)
+            trajs[s, i, :, :n_obs] = states_1
+            pad_scheme = [(0,episode_length-len(actions_1)),(0,0)]
+            actions_1 = np.pad(actions_1.astype(float),pad_scheme, constant_values=np.nan)
+            trajs[s, i, :, n_obs:] = actions_1
+            
+            
+    jsd_m = np.full((len(seeds),n_skills,n_skills,n_obs+n_act),np.nan)
+    for s in range(len(seeds)):
+        for i in range(n_skills):
+            j=0
+            while j<i:
+                jsd_m[s,i,j,:n_obs] = compute_jsd(trajs[s,i,:,:n_obs],
+                                                  trajs[s,j,:,:n_obs],
+                                                  model,
+                                                  bins=bins,
+                                                  states=True)
+                jsd_m[s,i,j,n_obs:] = compute_jsd(trajs[s,i,:,n_obs:],
+                                                  trajs[s,j,:,n_obs:],
+                                                  model,
+                                                  bins=bins, 
+                                                  states=False)
+                j+=1
+    jsd_m_states = jsd_m[:,:,:,:n_obs].mean(axis=-1).mean(axis=0)
+    jsd_m_actions = jsd_m[:,:,:,n_obs:].mean(axis=-1).mean(axis=0)
+    jsd_s_pd = pd.DataFrame(jsd_m_states.ravel(),columns=['jsd_s']).dropna()
+    jsd_a_pd = pd.DataFrame(jsd_m_actions.ravel(),columns=['jsd_a']).dropna()
+    jsd_pd = pd.concat([jsd_s_pd, jsd_a_pd],axis=1)
+    return jsd_pd
+
+
+def evaluate_jsd_separation(model, n_skills, episode_length, seeds, bins=50):
+    n_obs = model.observation_space.shape[0]
+    n_act = model.action_space.shape[0]
+    trajs = np.zeros((len(seeds),episode_length,n_obs+n_act))
+    skills = np.zeros(len(seeds,))
+    for s, seed in enumerate(seeds):
+        skill_idx = np.random.randint(0,n_skills)
+        seed = int(seed)
+        states_1, actions_1 = generate_trajectory(model,
+                                              skill_idx=skill_idx,
+                                              episode_length=episode_length,
+                                              seed=seed,
+                                              return_actions=True)
+        skills[s] = skill_idx
+        pad_scheme = [(0,episode_length-len(states_1)),(0,0)]
+        states_1 = np.pad(states_1.astype(float),pad_scheme, constant_values=np.nan)
+        trajs[s, :, :n_obs] = states_1
+        pad_scheme = [(0,episode_length-len(actions_1)),(0,0)]
+        actions_1 = np.pad(actions_1.astype(float),pad_scheme, constant_values=np.nan)
+        trajs[s, :, n_obs:] = actions_1
+    jsd_m = np.full((len(seeds),len(seeds),n_obs+n_act,2),np.nan)
+    for i in range(len(seeds)):
+        j=0
+        while j<i:
+            jsd_m[i,j,:n_obs,0] = compute_jsd(trajs[i,:,:n_obs],
+                                              trajs[j,:,:n_obs],
+                                              model,
+                                              bins=bins,
+                                              states=True)
+            jsd_m[i,j,n_obs:,0] = compute_jsd(trajs[i,:,n_obs:],
+                                              trajs[j,:,n_obs:],
+                                              model,
+                                              bins=bins, 
+                                              states=False)
+            
+            if skills[i] == skills[j]:
+                jsd_m[i,j,:,1] = 1.
+            else:
+                jsd_m[i,j,:,1] = 0.
+
+            j+=1
+
+
+    jsd_m_states = jsd_m[:,:,:n_obs,0].mean(axis=-1)
+    jsd_m_actions = jsd_m[:,:,n_obs:,0].mean(axis=-1)
+    jsd_m_label = jsd_m[:,:,:,1].mean(axis=-1)
+    jsd_label_pd = pd.DataFrame(jsd_m_label.ravel(),columns=['label']).dropna()
+    jsd_s_pd = pd.DataFrame(jsd_m_states.ravel(),columns=['jsd_s']).dropna()
+    jsd_a_pd = pd.DataFrame(jsd_m_actions.ravel(),columns=['jsd_a']).dropna()
+    jsd_pd = pd.concat([jsd_s_pd, jsd_a_pd,jsd_label_pd],axis=1)
+    return jsd_pd
