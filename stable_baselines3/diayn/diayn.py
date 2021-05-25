@@ -7,6 +7,7 @@ import torch as th
 from torch.nn import functional as F
 import pathlib
 import io
+from scipy.special import expit as sigm
 from stable_baselines3.common.save_util import load_from_zip_file, recursive_getattr, recursive_setattr, save_to_zip_file
 from stable_baselines3.common import logger
 from stable_baselines3.common.noise import ActionNoise
@@ -451,18 +452,31 @@ class DIAYN(SAC):
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
                 log_q_phi = self.discriminator(new_obs[:,self.disc_on])[:,z.argmax()].detach().cpu().numpy()
-                
-                if self.combined_rewards:
-                    if False:
-                        pass
+                diayn_reward =  log_q_phi - self.log_p_z[z.argmax()]
 
-                    else:
-                        diayn_reward =  self.beta * (log_q_phi - self.log_p_z[z.argmax()])
-                        reward = diayn_reward + true_reward
-                
+                if self.combined_rewards:
+                    if self.beta == 'auto':
+                        z_idx = np.argmax(z)
+                        mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer]
+                        mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
+                        mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
+                        mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))  
+                        if np.isnan(mean_true_reward):
+                            mean_true_reward = 0.
+                        if np.isnan(mean_diayn_reward):
+                            mean_diayn_reward = 0.
+                        beta = sigm(mean_true_reward-mean_diayn_reward)
+                        reward = beta * diayn_reward + (1-beta) * true_reward
+
+ 
+                    else:       
+                        reward = self.beta * diayn_reward + true_reward
+              
+
+
                 else:
-                    diayn_reward =  log_q_phi - self.log_p_z[z.argmax()]
                     reward = diayn_reward
+
 
                 
                 self.num_timesteps += 1
@@ -490,6 +504,8 @@ class DIAYN(SAC):
                         maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
                         maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
                         maybe_ep_info['r'] = observed_episode_reward[0]
+                        if self.beta == "auto":
+                            maybe_ep_info['beta'] = beta
 
                 self._update_info_buffer(infos, done)
 
@@ -731,6 +747,9 @@ class DIAYN(SAC):
         logger.record("time/fps", fps)
         logger.record("time/time_elapsed", int(time.time() - self.start_time), exclude="tensorboard")
         logger.record("time/total timesteps", self.num_timesteps, exclude="tensorboard")
+        if self.beta=='auto':
+            beta_log = self.ep_info_buffer[-1].get('beta')
+            logger.record('train/beta', beta_log)
         if self.use_sde:
             logger.record("train/std", (self.actor.get_std()).mean().item())
 
