@@ -100,7 +100,9 @@ class DIAYN(SAC):
         _init_setup_model: bool = True,
         disc_on : Union[list, str] = 'all',
         combined_rewards : bool = False,
-        beta: float = 0.01
+        beta: float = 0.01,
+        smerl : int = None,
+        eps : float = 0.05
     ):
 
         super(SAC, self).__init__(
@@ -129,6 +131,7 @@ class DIAYN(SAC):
             supported_action_spaces=(gym.spaces.Box),
         )
 
+        
         self.target_entropy = target_entropy
         self.log_ent_coef = None  # type: Optional[th.Tensor]
         # Entropy coefficient / Entropy temperature
@@ -137,6 +140,7 @@ class DIAYN(SAC):
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer = None
         
+
         #Initialization of the discriminator
         #TODO : hidden_sizes in params
         hidden_sizes = [30, 30]
@@ -154,6 +158,11 @@ class DIAYN(SAC):
         self.combined_rewards = combined_rewards
         self.beta = beta
         self.betas = np.ones(self.prior.event_shape[0])*1/2
+        self.smerl = smerl
+        self.eps=eps
+
+        if smerl:
+            assert beta != 'auto', "You must chose between SMERL and beta=\"auto\""
         if _init_setup_model:
             self._setup_model()
 
@@ -460,9 +469,9 @@ class DIAYN(SAC):
                 if self.combined_rewards:
                     if self.beta == 'auto':
                         z_idx = np.argmax(z)
-                        mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer][-10:]
+                        mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer]
                         mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
-                        mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer][-10:]
+                        mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
                         mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))
                         if np.isnan(mean_true_reward):
                             mean_true_reward = 0.
@@ -471,7 +480,11 @@ class DIAYN(SAC):
                         beta = sigm((mean_true_reward-mean_diayn_reward)/20)
                         reward = beta * diayn_reward + (1-beta) * true_reward
 
- 
+                    elif self.smerl:
+                        z_idx = np.argmax(z)
+                        mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
+                        mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))
+                        reward = self.beta * diayn_reward * (mean_true_reward>=(1-self.eps)*self.smerl) + true_reward
                     else:       
                         reward = self.beta * diayn_reward + true_reward
               
