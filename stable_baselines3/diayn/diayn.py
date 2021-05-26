@@ -153,6 +153,7 @@ class DIAYN(SAC):
         self.prior = prior
         self.combined_rewards = combined_rewards
         self.beta = beta
+        self.betas = np.ones(self.prior.event_shape[0])*1/2
         if _init_setup_model:
             self._setup_model()
 
@@ -452,20 +453,22 @@ class DIAYN(SAC):
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
                 log_q_phi = self.discriminator(new_obs[:,self.disc_on])[:,z.argmax()].detach().cpu().numpy()
+                if isinstance(self.log_p_z, th.Tensor):
+                    self.log_p_z = self.log_p_z.cpu().numpy()
                 diayn_reward =  log_q_phi - self.log_p_z[z.argmax()]
 
                 if self.combined_rewards:
                     if self.beta == 'auto':
                         z_idx = np.argmax(z)
-                        mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer]
+                        mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer][-10:]
                         mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
-                        mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
-                        mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))  
+                        mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer][-10:]
+                        mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))
                         if np.isnan(mean_true_reward):
                             mean_true_reward = 0.
                         if np.isnan(mean_diayn_reward):
                             mean_diayn_reward = 0.
-                        beta = sigm(mean_true_reward-mean_diayn_reward)
+                        beta = sigm((mean_true_reward-mean_diayn_reward)/20)
                         reward = beta * diayn_reward + (1-beta) * true_reward
 
  
@@ -498,14 +501,17 @@ class DIAYN(SAC):
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
                         z_idx = np.argmax(z)
+                        if self.beta == 'auto':
+                            self.betas[z_idx] = beta
                         for i in range(self.prior.event_shape[0]):
                             maybe_ep_info[f'r_diayn_{i}'] = np.nan
                             maybe_ep_info[f'r_true_{i}'] = np.nan
+                            if self.beta == "auto":
+                                maybe_ep_info[f"beta_{i}"] = self.betas[i]
                         maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
                         maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
                         maybe_ep_info['r'] = observed_episode_reward[0]
-                        if self.beta == "auto":
-                            maybe_ep_info['beta'] = beta
+
 
                 self._update_info_buffer(infos, done)
 
@@ -697,6 +703,7 @@ class DIAYN(SAC):
         )
 
         # load parameters
+
         model.__dict__.update(data)
         model.__dict__.update(kwargs)
         model._setup_model()
@@ -727,6 +734,7 @@ class DIAYN(SAC):
         fps = int(self.num_timesteps / (time.time() - self.start_time))
         logger.record("time/episodes", self._episode_num, exclude="tensorboard")
         if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
+
             logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
             logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
             for i in range(self.prior.event_shape[0]):
@@ -743,13 +751,14 @@ class DIAYN(SAC):
                          
                 logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
                               mean_true_reward)
+                if self.beta == 'auto':
+                    beta = self.ep_info_buffer[-1].get(f"beta_{i}")
+                    logger.record(f'train/beta_{i}', beta)
 
         logger.record("time/fps", fps)
         logger.record("time/time_elapsed", int(time.time() - self.start_time), exclude="tensorboard")
         logger.record("time/total timesteps", self.num_timesteps, exclude="tensorboard")
-        if self.beta=='auto':
-            beta_log = self.ep_info_buffer[-1].get('beta')
-            logger.record('train/beta', beta_log)
+
         if self.use_sde:
             logger.record("train/std", (self.actor.get_std()).mean().item())
 
