@@ -183,6 +183,8 @@ def configure_logger(
             # Continue training in the same directory
             latest_run_id -= 1
         save_path = os.path.join(tensorboard_log, f"{tb_log_name}_{latest_run_id + 1}")
+        print(save_path)
+        save_path = os.path.normpath(save_path)
         if verbose >= 1:
             logger.configure(save_path, ["stdout", "tensorboard"])
         else:

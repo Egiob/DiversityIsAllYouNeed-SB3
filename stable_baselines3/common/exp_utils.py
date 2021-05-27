@@ -8,7 +8,7 @@ import pandas as pd
 import os
 
 
-def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_steps, buffer_size, disc_on, seed, ent_coef, combined_rewards, beta, smerl, eps):
+def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_steps, buffer_size, disc_on, seed, ent_coef, combined_rewards, beta, smerl, eps, model_prefix=""):
     train_freq_name = "".join([str(x)[:2] for x in train_freq])
     disc_on_name = "".join([str(x) for x in disc_on])
     if smerl:
@@ -20,8 +20,8 @@ def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_step
     if combined_rewards:
         run_name = f"{env_name}__skills-{n_skills}__disc-{disc_on_name}__tf-{train_freq_name}__gs-{gradient_steps}__bf-{float(buffer_size):.2}__{smerl_name}__ent-{ent_coef}__beta-{beta:.2}__start-{t_start:.2}__end-{t_end:.2}__s-{seed}"
         
-    log_path = "./logs/"+ env_name  + '/' + combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + "__".join(run_name.split("__")[2:-3])
-    save_path = "./models/" + env_name + '/' +combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + run_name
+    log_path = "./logs/"+ env_name  + '/' + combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + model_prefix+"__".join(run_name.split("__")[2:-3])
+    save_path = "./models/" + env_name + '/' +combined_rewards*"combined_rew/"+f"{n_skills}-skills/" +model_prefix+ run_name
     video_path = "./video/" + env_name + '/' +combined_rewards*"combined_rew/"+ f"{n_skills}-skills/" + run_name
     run_name = "__".join(run_name.split("__")[-3:])
     log_path = os.path.normpath(log_path)
