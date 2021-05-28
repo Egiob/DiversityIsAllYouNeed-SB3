@@ -102,7 +102,9 @@ class DIAYN(SAC):
         combined_rewards : bool = False,
         beta: float = 0.01,
         smerl : int = None,
-        eps : float = 0.05
+        eps : float = 0.05,
+        beta_temp : float = 20.,
+        beta_momentum : float = 0.8
     ):
 
         super(SAC, self).__init__(
@@ -157,7 +159,10 @@ class DIAYN(SAC):
         self.prior = prior
         self.combined_rewards = combined_rewards
         self.beta = beta
-        self.betas = np.ones(self.prior.event_shape[0])*1/2
+        if self.beta == 'auto':
+            self.beta_buffer = [np.zeros(prior.event_shape[0])]
+            self.beta_momentum = beta_momentum
+            self.beta_temp = beta_temp
         self.smerl = smerl
         self.eps=eps
 
@@ -477,8 +482,12 @@ class DIAYN(SAC):
                             mean_true_reward = 0.
                         if np.isnan(mean_diayn_reward):
                             mean_diayn_reward = 0.
-                        beta = sigm((mean_true_reward-mean_diayn_reward)/20)
+                        last_beta = self.beta_buffer[-1][z_idx]
+                        beta = sigm((mean_true_reward-mean_diayn_reward)/self.beta_temp) * (1-self.beta_momentum) + last_beta * self.beta_momentum
                         reward = beta * diayn_reward + (1-beta) * true_reward
+                        betas = np.zeros(self.prior.event_shape[0])
+                        betas[z_idx] = beta
+                        self.beta_buffer.append(betas)
 
                     elif self.smerl:
                         z_idx = np.argmax(z)
@@ -514,13 +523,11 @@ class DIAYN(SAC):
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
                         z_idx = np.argmax(z)
-                        if self.beta == 'auto':
-                            self.betas[z_idx] = beta
                         for i in range(self.prior.event_shape[0]):
                             maybe_ep_info[f'r_diayn_{i}'] = np.nan
                             maybe_ep_info[f'r_true_{i}'] = np.nan
                             if self.beta == "auto":
-                                maybe_ep_info[f"beta_{i}"] = self.betas[i]
+                                maybe_ep_info[f"beta_{i}"] = betas[i]
                         maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
                         maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
                         maybe_ep_info['r'] = observed_episode_reward[0]
