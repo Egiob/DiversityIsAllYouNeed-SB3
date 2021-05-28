@@ -15,8 +15,8 @@ def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_step
         smerl_name = f"smerl-{smerl}__eps-{eps}"
     else:
         smerl_name = ""
-    env_name = env_id.split(':')[-1].split('-')[0].lower()
-    run_name = f"{env_name}__skills-{n_skills}__disc-{disc_on_name}__tf-{train_freq_name}__gs-{gradient_steps}__bf-{float(buffer_size):.2}__{smerl_name}__ent-{ent_coef}__start-{t_start:.2}__end-{t_end:.2}__s-{seed}"
+    env_name = env_id.split(':')[-1].lower()
+    run_name = f"{env_name}__skills-{n_skills}__disc-{disc_on_name}__tf-{train_freq_name}__gs-{gradient_steps}__bf-{float(buffer_size):.2}__ent-{ent_coef}__start-{t_start:.2}__end-{t_end:.2}__s-{seed}"
     if combined_rewards:
         run_name = f"{env_name}__skills-{n_skills}__disc-{disc_on_name}__tf-{train_freq_name}__gs-{gradient_steps}__bf-{float(buffer_size):.2}__{smerl_name}__ent-{ent_coef}__beta-{beta:.2}__start-{t_start:.2}__end-{t_end:.2}__s-{seed}"
         
@@ -208,3 +208,112 @@ def evaluate_jsd_separation(model, n_skills, episode_length, seeds, bins=50):
     jsd_a_pd = pd.DataFrame(jsd_m_actions.ravel(),columns=['jsd_a']).dropna()
     jsd_pd = pd.concat([jsd_s_pd, jsd_a_pd,jsd_label_pd],axis=1)
     return jsd_pd
+
+
+def evaluate_jsd_separation_mixed(model, n_skills, episode_length, seeds, bins=50):
+    n_obs = model.observation_space.shape[0]
+    n_act = model.action_space.shape[0]
+    trajs = np.zeros((len(seeds),episode_length,n_obs+n_act))
+    skills = np.zeros((len(seeds),2))
+    for s, seed in enumerate(seeds):
+        p = np.random.random()
+        seed = int(seed)
+        if p < 0.5:           
+            skill_idx = np.random.choice(np.arange(n_skills),size=2,replace=False)
+            states_1, actions_1 = generate_mixed_trajectory(model,
+                                                            skills_idx=skill_idx,
+                                                            episode_length=episode_length,
+                                                            seed=seed,
+                                                            return_actions=True)
+            skills[s] = skill_idx
+        else:
+            skill_idx = np.random.randint(0,n_skills)
+            states_1, actions_1 = generate_trajectory(model,
+                                      skill_idx=skill_idx,
+                                      episode_length=episode_length,
+                                      seed=seed,
+                                      return_actions=True)
+
+            skills[s] = [skill_idx]*2
+        pad_scheme = [(0,episode_length-len(states_1)),(0,0)]
+        states_1 = np.pad(states_1.astype(float),pad_scheme, constant_values=np.nan)
+        trajs[s, :, :n_obs] = states_1
+        pad_scheme = [(0,episode_length-len(actions_1)),(0,0)]
+        actions_1 = np.pad(actions_1.astype(float),pad_scheme, constant_values=np.nan)
+        trajs[s, :, n_obs:] = actions_1
+        
+              
+    jsd_m = np.full((len(seeds),len(seeds),n_obs+n_act,2),np.nan)
+    for i in range(len(seeds)):
+        j=0
+        while j<i:
+            jsd_m[i,j,:n_obs,0] = compute_jsd(trajs[i,:,:n_obs],
+                                              trajs[j,:,:n_obs],
+                                              model,
+                                              bins=bins,
+                                              states=True)
+            jsd_m[i,j,n_obs:,0] = compute_jsd(trajs[i,:,n_obs:],
+                                              trajs[j,:,n_obs:],
+                                              model,
+                                              bins=bins, 
+                                              states=False)
+            
+            if (skills[i]==skills[j]).all():
+                jsd_m[i,j,:,1] = 4.
+                
+            elif (np.sort(skills[i]) == np.sort(skills[j])).all():
+                jsd_m[i,j,:,1] = 1.
+            elif (np.sort(skills[i]) == np.sort(skills[j])).any():
+                jsd_m[i,j,:,1] = 2.
+            else:
+                jsd_m[i,j,:,1] = 0.       
+
+            j+=1
+
+
+    jsd_m_states = jsd_m[:,:,:n_obs,0].mean(axis=-1)
+    jsd_m_actions = jsd_m[:,:,n_obs:,0].mean(axis=-1)
+    jsd_m_label = jsd_m[:,:,:,1].mean(axis=-1)
+    jsd_label_pd = pd.DataFrame(jsd_m_label.ravel(),columns=['label']).dropna()
+    jsd_s_pd = pd.DataFrame(jsd_m_states.ravel(),columns=['jsd_s']).dropna()
+    jsd_a_pd = pd.DataFrame(jsd_m_actions.ravel(),columns=['jsd_a']).dropna()
+    jsd_pd = pd.concat([jsd_s_pd, jsd_a_pd,jsd_label_pd],axis=1)
+    return jsd_pd
+
+
+def generate_mixed_trajectory(model, skills_idx, episode_length, seed=0, return_actions=True):
+    states = []
+    actions = []
+    env = model.env
+
+
+    env.seed(seed)
+    obs = env.reset()
+    states.append(obs.flatten())
+    for i in range(episode_length-1):
+        if i < episode_length//2:
+            skill = th.zeros(model.prior.event_shape)
+            skill[skills_idx[0]] = 1
+        else:
+            skill = th.zeros(model.prior.event_shape)
+            skill[skills_idx[1]] = 1
+            
+            
+        obs = np.concatenate([obs,skill[None,:]],axis=1)
+        action, _ = model.predict(obs)
+
+        actions.append(action.flatten())
+        obs, _, done, _ = env.step(action)
+
+        if done:
+            break
+        
+        states.append(obs.flatten())
+
+
+    states = np.reshape(states, (-1,*model.observation_space.shape))
+    actions = np.reshape(actions, (-1,*model.action_space.shape))
+    if return_actions:
+        return states, actions
+    else:
+        return states

@@ -484,7 +484,7 @@ class DIAYN(SAC):
                         z_idx = np.argmax(z)
                         mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
                         mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))
-                        reward = self.beta * diayn_reward * (mean_true_reward>=(1-self.eps)*self.smerl) + true_reward
+                        reward = self.beta * diayn_reward * (mean_true_reward>=self.smerl-np.abs(self.eps*self.smerl)) + true_reward
                     else:       
                         reward = self.beta * diayn_reward + true_reward
               
