@@ -14,6 +14,7 @@ from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutReturnZ, Schedule, TrainFreq, TrainFrequencyUnit
 from stable_baselines3.common.utils import safe_mean, should_collect_more_steps, polyak_update, check_for_correct_spaces
+from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.diayn.policies import DIAYNPolicy
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import VecEnv
@@ -485,7 +486,7 @@ class DIAYN(SAC):
                         last_beta = self.beta_buffer[-1][z_idx]
                         beta = sigm((mean_true_reward-mean_diayn_reward)/self.beta_temp) * (1-self.beta_momentum) + last_beta * self.beta_momentum
                         reward = beta * diayn_reward + (1-beta) * true_reward
-                        betas = np.zeros(self.prior.event_shape[0])
+                        betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta
                         self.beta_buffer.append(betas)
 
@@ -761,14 +762,16 @@ class DIAYN(SAC):
                 mean_diayn_reward = [ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer]
 
                 mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
-
+                if np.isnan(mean_diayn_reward):
+                    mean_diayn_reward=0
                 logger.record(f"diayn/ep_diayn_reward_mean_skill_{i}",
                               mean_diayn_reward)
 
                 mean_true_reward = [ep_info.get(f"r_true_{i}") for ep_info in self.ep_info_buffer]
                 
                 mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))  
-                         
+                if np.isnan(mean_true_reward):
+                    mean_diayn_reward=0
                 logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
                               mean_true_reward)
                 if self.beta == 'auto':
