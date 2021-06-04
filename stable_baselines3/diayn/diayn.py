@@ -484,7 +484,7 @@ class DIAYN(SAC):
                         if np.isnan(mean_diayn_reward):
                             mean_diayn_reward = 0.
                         last_beta = self.beta_buffer[-1][z_idx]
-                        beta = sigm((mean_true_reward-mean_diayn_reward)/self.beta_temp) * (1-self.beta_momentum) + last_beta * self.beta_momentum
+                        beta = sigm((mean_true_reward-3*mean_diayn_reward)/self.beta_temp) * (1-self.beta_momentum) + last_beta * self.beta_momentum
                         reward = beta * diayn_reward + (1-beta) * true_reward
                         betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta
@@ -493,7 +493,11 @@ class DIAYN(SAC):
                     elif self.smerl:
                         z_idx = np.argmax(z)
                         mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
+
+                        #print(mean_true_reward)
                         mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))
+                        if np.isnan(mean_true_reward):
+                            mean_true_reward = 0.
                         reward = self.beta * diayn_reward * (mean_true_reward>=self.smerl-np.abs(self.eps*self.smerl)) + true_reward
                     else:       
                         reward = self.beta * diayn_reward + true_reward
@@ -521,6 +525,7 @@ class DIAYN(SAC):
 
                 # Retrieve reward and episode length if using Monitor wrapper
                 for idx, info in enumerate(infos):
+                    #print(info)
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
                         z_idx = np.argmax(z)
@@ -532,6 +537,7 @@ class DIAYN(SAC):
                         maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
                         maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
                         maybe_ep_info['r'] = observed_episode_reward[0]
+                        #print(info)
 
 
                 self._update_info_buffer(infos, done)
@@ -760,10 +766,10 @@ class DIAYN(SAC):
             logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
             for i in range(self.prior.event_shape[0]):
                 mean_diayn_reward = [ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer]
-
+                #print(mean_diayn_reward)
                 mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
                 if np.isnan(mean_diayn_reward):
-                    mean_diayn_reward=0
+                    mean_diayn_reward=0.
                 logger.record(f"diayn/ep_diayn_reward_mean_skill_{i}",
                               mean_diayn_reward)
 
@@ -771,7 +777,7 @@ class DIAYN(SAC):
                 
                 mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))  
                 if np.isnan(mean_true_reward):
-                    mean_diayn_reward=0
+                    mean_diayn_reward=0.
                 logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
                               mean_true_reward)
                 if self.beta == 'auto':
