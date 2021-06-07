@@ -498,7 +498,11 @@ class DIAYN(SAC):
                         mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))
                         if np.isnan(mean_true_reward):
                             mean_true_reward = 0.
-                        reward = self.beta * diayn_reward * (mean_true_reward>=self.smerl-np.abs(self.eps*self.smerl)) + true_reward
+                        
+                        beta_on = float((mean_true_reward>=self.smerl-np.abs(self.eps*self.smerl)))
+                        betas = self.beta_buffer[-1].copy()
+                        betas[z_idx] = beta_on
+                        reward = self.beta * diayn_reward * beta_on + true_reward
                     else:       
                         reward = self.beta * diayn_reward + true_reward
               
@@ -532,7 +536,7 @@ class DIAYN(SAC):
                         for i in range(self.prior.event_shape[0]):
                             maybe_ep_info[f'r_diayn_{i}'] = np.nan
                             maybe_ep_info[f'r_true_{i}'] = np.nan
-                            if self.beta == "auto":
+                            if self.beta == "auto" or self.smerl:
                                 maybe_ep_info[f"beta_{i}"] = betas[i]
                         maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
                         maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
@@ -780,7 +784,7 @@ class DIAYN(SAC):
                     mean_diayn_reward=0.
                 logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
                               mean_true_reward)
-                if self.beta == 'auto':
+                if self.beta == 'auto' or self.smerl:
                     beta = self.ep_info_buffer[-1].get(f"beta_{i}")
                     logger.record(f'train/beta_{i}', beta)
 
