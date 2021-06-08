@@ -160,12 +160,14 @@ class DIAYN(SAC):
         self.prior = prior
         self.combined_rewards = combined_rewards
         self.beta = beta
-        if self.beta == 'auto':
-            self.beta_buffer = [np.zeros(prior.event_shape[0])]
-            self.beta_momentum = beta_momentum
-            self.beta_temp = beta_temp
         self.smerl = smerl
         self.eps=eps
+
+        if self.beta == 'auto' or self.smerl:
+            self.beta_buffer = [np.zeros(prior.event_shape[0])]
+            if self.beta == 'auto':
+                self.beta_momentum = beta_momentum
+                self.beta_temp = beta_temp
 
         if smerl:
             assert beta != 'auto', "You must chose between SMERL and beta=\"auto\""
@@ -502,6 +504,7 @@ class DIAYN(SAC):
                         beta_on = float((mean_true_reward>=self.smerl-np.abs(self.eps*self.smerl)))
                         betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta_on
+                        self.beta_buffer.append(betas)
                         reward = self.beta * diayn_reward * beta_on + true_reward
                     else:       
                         reward = self.beta * diayn_reward + true_reward
@@ -781,7 +784,7 @@ class DIAYN(SAC):
                 
                 mean_true_reward = safe_mean(mean_true_reward, where=~np.isnan(mean_true_reward))  
                 if np.isnan(mean_true_reward):
-                    mean_diayn_reward=0.
+                    mean_true_reward=0.
                 logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
                               mean_true_reward)
                 if self.beta == 'auto' or self.smerl:
