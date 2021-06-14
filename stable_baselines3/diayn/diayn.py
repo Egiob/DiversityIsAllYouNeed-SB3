@@ -539,8 +539,9 @@ class DIAYN(SAC):
                         for i in range(self.prior.event_shape[0]):
                             maybe_ep_info[f'r_diayn_{i}'] = np.nan
                             maybe_ep_info[f'r_true_{i}'] = np.nan
-                            if self.beta == "auto" or self.smerl:
-                                maybe_ep_info[f"beta_{i}"] = betas[i]
+                            if self.combined_rewards:
+                                if self.beta == "auto" or self.smerl:
+                                    maybe_ep_info[f"beta_{i}"] = betas[i]
                         maybe_ep_info[f'r_diayn_{z_idx}'] = diayn_episode_reward[0]
                         maybe_ep_info[f'r_true_{z_idx}'] = true_episode_reward[0]
                         maybe_ep_info['r'] = observed_episode_reward[0]
@@ -787,9 +788,10 @@ class DIAYN(SAC):
                     mean_true_reward=0.
                 logger.record(f"diayn/ep_true_reward_mean_skill_{i}",
                               mean_true_reward)
-                if self.beta == 'auto' or self.smerl:
-                    beta = self.ep_info_buffer[-1].get(f"beta_{i}")
-                    logger.record(f'train/beta_{i}', beta)
+                if self.combined_rewards:
+                    if self.beta == 'auto' or self.smerl:
+                        beta = self.ep_info_buffer[-1].get(f"beta_{i}")
+                        logger.record(f'train/beta_{i}', beta)
 
         logger.record("time/fps", fps)
         logger.record("time/time_elapsed", int(time.time() - self.start_time), exclude="tensorboard")

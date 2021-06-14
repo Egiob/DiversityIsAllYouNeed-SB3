@@ -6,6 +6,7 @@ from stable_baselines3 import DIAYN
 import gym
 import pandas as pd
 import os
+from stable_baselines3.common.model_serializer import ModelSerializer
 
 
 def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_steps, buffer_size, disc_on, seed, ent_coef, combined_rewards, beta, smerl, eps, model_prefix=""):
@@ -33,8 +34,9 @@ def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions
     states = []
     actions = []
     env = model.env
-    skill = th.zeros(model.prior.event_shape)
+    skill = np.zeros(model.prior.event_shape)
     skill[skill_idx] = 1
+
     env.seed(seed)
     obs = env.reset()
     states.append(obs.flatten())
@@ -317,3 +319,10 @@ def generate_mixed_trajectory(model, skills_idx, episode_length, seed=0, return_
         return states, actions
     else:
         return states
+    
+    
+    
+def export_to_onnx(model, save_path):
+    modese = ModelSerializer(model.policy)
+    modese.export_policy_model(save_path)
+    
