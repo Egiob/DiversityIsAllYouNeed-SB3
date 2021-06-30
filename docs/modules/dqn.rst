@@ -17,6 +17,7 @@ and make use of different tricks to stabilize the learning with neural networks:
 
     MlpPolicy
     CnnPolicy
+    MultiInputPolicy
 
 
 Notes
@@ -40,10 +41,11 @@ Can I use?
 ============= ====== ===========
 Space         Action Observation
 ============= ====== ===========
-Discrete      ✔      ✔
-Box           ❌      ✔
-MultiDiscrete ❌      ✔
-MultiBinary   ❌      ✔
+Discrete      ✔️      ✔️
+Box           ❌      ✔️
+MultiDiscrete ❌      ✔️
+MultiBinary   ❌      ✔️
+Dict          ❌      ✔️️
 ============= ====== ===========
 
 
@@ -53,7 +55,6 @@ Example
 .. code-block:: python
 
   import gym
-  import numpy as np
 
   from stable_baselines3 import DQN
 
@@ -132,4 +133,7 @@ DQN Policies
   :noindex:
 
 .. autoclass:: CnnPolicy
+  :members:
+
+.. autoclass:: MultiInputPolicy
   :members:

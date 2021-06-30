@@ -4,26 +4,62 @@ Changelog
 ==========
 
 
-Release 1.1.0a5 (WIP)
+Release 1.1.0a11 (WIP)
 ---------------------------
+
+**Dict observation support, timeout handling and refactored HER**
 
 Breaking Changes:
 ^^^^^^^^^^^^^^^^^
+- All customs environments (e.g. the ``BitFlippingEnv`` or ``IdentityEnv``) were moved to ``stable_baselines3.common.envs`` folder
+- Refactored ``HER`` which is now the ``HerReplayBuffer`` class that can be passed to any off-policy algorithm
+- Handle timeout termination properly for off-policy algorithms (when using ``TimeLimit``)
 - Renamed ``_last_dones`` and ``dones`` to ``_last_episode_starts`` and ``episode_starts`` in ``RolloutBuffer``.
+- Removed ``ObsDictWrapper`` as ``Dict`` observation spaces are now supported
+
+.. code-block:: python
+
+  her_kwargs = dict(n_sampled_goal=2, goal_selection_strategy="future", online_sampling=True)
+  # SB3 < 1.1.0
+  # model = HER("MlpPolicy", env, model_class=SAC, **her_kwargs)
+  # SB3 >= 1.1.0:
+  model = SAC("MultiInputPolicy", env, replay_buffer_class=HerReplayBuffer, replay_buffer_kwargs=her_kwargs)
+
+- Updated the KL Divergence estimator in the PPO algorithm to be positive definite and have lower variance (@09tangriro)
+- Updated the KL Divergence check in the PPO algorithm to be before the gradient update step rather than after end of epoch (@09tangriro)
+- Removed parameter ``channels_last`` from ``is_image_space`` as it can be inferred.
+- The logger object is now an attribute ``model.logger`` that be set by the user using ``model.set_logger()``
+- Changed the signature of ``logger.configure`` and ``utils.configure_logger``, they now return a ``Logger`` object
+- Removed ``Logger.CURRENT`` and ``Logger.DEFAULT``
+- Moved ``warn(), debug(), log(), info(), dump()`` methods to the ``Logger`` class
+- ``.learn()`` now throws an import error when the user tries to log to tensorboard but the package is not installed
 
 New Features:
 ^^^^^^^^^^^^^
+- Added support for single-level ``Dict`` observation space (@JadenTravnik)
+- Added ``DictRolloutBuffer`` ``DictReplayBuffer`` to support dictionary observations (@JadenTravnik)
+- Added ``StackedObservations`` and ``StackedDictObservations`` that are used within ``VecFrameStack``
+- Added simple 4x4 room Dict test environments
+- ``HerReplayBuffer`` now supports ``VecNormalize`` when ``online_sampling=False``
 - Added `VecMonitor <https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/vec_env/vec_monitor.py>`_ and
   `VecExtractDictObs <https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/vec_env/vec_extract_dict_obs.py>`_ wrappers
   to handle gym3-style vectorized environments (@vwxyzjn)
 - Ignored the terminal observation if the it is not provided by the environment
   such as the gym3-style vectorized environments. (@vwxyzjn)
+- Added policy_base as input to the OnPolicyAlgorithm for more flexibility (@09tangriro)
+- Added support for image observation when using ``HER``
+- Added ``replay_buffer_class`` and ``replay_buffer_kwargs`` arguments to off-policy algorithms
+- Added ``kl_divergence`` helper for ``Distribution`` classes (@09tangriro)
+- Added support for vector environments with ``num_envs > 1`` (@benblack769)
+- Added ``wrapper_kwargs`` argument to ``make_vec_env`` (@amy12xx)
 
 Bug Fixes:
 ^^^^^^^^^^
 - Fixed potential issue when calling off-policy algorithms with default arguments multiple times (the size of the replay buffer would be the same)
 - Fixed loading of ``ent_coef`` for ``SAC`` and ``TQC``, it was not optimized anymore (thanks @Atlis)
 - Fixed saving of ``A2C`` and ``PPO`` policy when using gSDE (thanks @liusida)
+- Fixed a bug where no output would be shown even if ``verbose>=1`` after passing ``verbose=0`` once
+- Fixed observation buffers dtype in DictReplayBuffer (@c-rizz)
 
 Deprecations:
 ^^^^^^^^^^^^^
@@ -31,9 +67,11 @@ Deprecations:
 Others:
 ^^^^^^^
 - Added ``flake8-bugbear`` to tests dependencies to find likely bugs
+- Updated ``env_checker`` to reflect support of dict observation spaces
 - Added Code of Conduct
 - Added tests for GAE and lambda return computation
-- Updated docker image with newest black version
+- Updated distribution entropy test (thanks @09tangriro)
+- Added sanity check ``batch_size > 1`` in PPO to avoid NaN in advantage normalization
 
 Documentation:
 ^^^^^^^^^^^^^^
@@ -45,6 +83,13 @@ Documentation:
 - Clarified pip installation in Zsh (@tom-doerr)
 - Clarified return computation for on-policy algorithms (TD(lambda) estimate was used)
 - Added example for using ``ProcgenEnv``
+- Added note about advanced custom policy example for off-policy algorithms
+- Fixed DQN unicode checkmarks
+- Updated migration guide (@juancroldan)
+- Pinned ``docutils==0.16`` to avoid issue with rtd theme
+- Clarified callback ``save_freq`` definition
+- Added doc on how to pass a custom logger
+- Remove recurrent policies from ``A2C`` docs (@bstee615)
 
 
 Release 1.0 (2021-03-15)
@@ -68,6 +113,7 @@ New Features:
 - Added support for ``custom_objects`` when loading models
 
 
+
 Bug Fixes:
 ^^^^^^^^^^
 - Fixed a bug with ``DQN`` predict method when using ``deterministic=False`` with image space
@@ -78,9 +124,13 @@ Documentation:
 - Added new project using SB3: rl_reach (@PierreExeter)
 - Added note about slow-down when switching to PyTorch
 - Add a note on continual learning and resetting environment
+
+Others:
+^^^^^^^
 - Updated RL-Zoo to reflect the fact that is it more than a collection of trained agents
 - Added images to illustrate the training loop and custom policies (created with https://excalidraw.com/)
 - Updated the custom policy section
+
 
 Pre-Release 0.11.1 (2021-02-27)
 -------------------------------
@@ -128,6 +178,7 @@ New Features:
 - ``EvalCallback`` now logs the success rate when available (``is_success`` must be present in the info dict)
 - Added new wrappers to log images and matplotlib figures to tensorboard. (@zampanteymedio)
 - Add support for text records to ``Logger``. (@lorenz-h)
+
 
 Bug Fixes:
 ^^^^^^^^^^
@@ -654,5 +705,6 @@ And all the contributors:
 @flodorner @KuKuXia @NeoExtended @PartiallyTyped @mmcenta @richardwu @kinalmehta @rolandgvc @tkelestemur @mloo3
 @tirafesi @blurLake @koulakis @joeljosephjin @shwang @rk37 @andyshih12 @RaphaelWag @xicocaio
 @diditforlulz273 @liorcohen5 @ManifoldFR @mloo3 @SwamyDev @wmmc88 @megan-klaiber @thisray
-@tfederico @hn2 @LucasAlegre @AptX395 @zampanteymedio @decodyng @ardabbour @lorenz-h @mschweizer @lorepieri8 @vwxyzjn
-@ShangqunYu @PierreExeter @JacopoPan @ltbd78 @tom-doerr @Atlis @liusida
+@tfederico @hn2 @LucasAlegre @AptX395 @zampanteymedio @JadenTravnik @decodyng @ardabbour @lorenz-h @mschweizer @lorepieri8 @vwxyzjn
+@ShangqunYu @PierreExeter @JacopoPan @ltbd78 @tom-doerr @Atlis @liusida @09tangriro @amy12xx @juancroldan @benblack769 @bstee615
+@c-rizz
