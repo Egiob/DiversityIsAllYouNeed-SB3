@@ -4,6 +4,20 @@
 [![codestyle](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 
+# DIAYN Implementation
+
+This repository contains an implementation of the algorithm Diversity Is All you Need (see [paper](https://arxiv.org/abs/1802.06070)) on top of the implementation of SAC of Stable Baselines 3.
+
+## Installation instructions
+Refer to the instructions of Stable Baselines 3.
+
+## Usage
+The DIAYN implementation follows the API of the other algorithms in SB3 and specifically the one of SAC. For extra parameters, refer to the file [diayn.py](stable_baselines3/diayn/diayn.py).
+
+## Features
+- Generation of skills from a skill distribution defined by a prior (only categorical uniform is supported from now) in an unsupervised manner.
+- SMERL algorithm that allow to learn diverse skills that solve the given task as well as being different from each other (see [paper](https://arxiv.org/pdf/2010.14484.pdf)). 
+
 # Stable Baselines3
 
 Stable Baselines3 (SB3) is a set of reliable implementations of reinforcement learning algorithms in PyTorch. It is the next major version of [Stable Baselines](https://github.com/hill-a/stable-baselines).
@@ -21,20 +35,20 @@ These algorithms will make it easier for the research community and industry to 
 you can take a look at the issues [#48](https://github.com/DLR-RM/stable-baselines3/issues/48) and [#49](https://github.com/DLR-RM/stable-baselines3/issues/49) for more details.
 
 
-| **Features**                | **Stable-Baselines3** |
-| --------------------------- | ----------------------|
-| State of the art RL methods | :heavy_check_mark: |
-| Documentation               | :heavy_check_mark: |
-| Custom environments         | :heavy_check_mark: |
-| Custom policies             | :heavy_check_mark: |
-| Common interface            | :heavy_check_mark: |
-| `Dict` observation space support  | :heavy_check_mark: |
-| Ipython / Notebook friendly | :heavy_check_mark: |
-| Tensorboard support         | :heavy_check_mark: |
-| PEP8 code style             | :heavy_check_mark: |
-| Custom callback             | :heavy_check_mark: |
-| High code coverage          | :heavy_check_mark: |
-| Type hints                  | :heavy_check_mark: |
+| **Features**                     | **Stable-Baselines3** |
+| -------------------------------- | --------------------- |
+| State of the art RL methods      | :heavy_check_mark:    |
+| Documentation                    | :heavy_check_mark:    |
+| Custom environments              | :heavy_check_mark:    |
+| Custom policies                  | :heavy_check_mark:    |
+| Common interface                 | :heavy_check_mark:    |
+| `Dict` observation space support | :heavy_check_mark:    |
+| Ipython / Notebook friendly      | :heavy_check_mark:    |
+| Tensorboard support              | :heavy_check_mark:    |
+| PEP8 code style                  | :heavy_check_mark:    |
+| Custom callback                  | :heavy_check_mark:    |
+| High code coverage               | :heavy_check_mark:    |
+| Type hints                       | :heavy_check_mark:    |
 
 
 ### Planned features
@@ -158,15 +172,15 @@ All the following examples can be executed online using Google colab notebooks:
 
 ## Implemented Algorithms
 
-| **Name**         | **Recurrent**      | `Box`          | `Discrete`     | `MultiDiscrete` | `MultiBinary`  | **Multi Processing**              |
-| ------------------- | ------------------ | ------------------ | ------------------ | ------------------- | ------------------ | --------------------------------- |
-| A2C   | :x: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:                |
-| DDPG  | :x: | :heavy_check_mark: | :x:                | :x:                 | :x:                | :x:                               |
-| DQN   | :x: | :x: | :heavy_check_mark: | :x:                 | :x:                | :x:                               |
-| HER   | :x: | :heavy_check_mark: | :heavy_check_mark: | :x:                 | :x:                | :x:                               |
-| PPO   | :x: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:  | :heavy_check_mark: | :heavy_check_mark:                |
-| SAC   | :x: | :heavy_check_mark: | :x:                | :x:                 | :x:                | :x:                               |
-| TD3   | :x: | :heavy_check_mark: | :x:                | :x:                 | :x:                | :x:                               |
+| **Name** | **Recurrent** | `Box`              | `Discrete`         | `MultiDiscrete`    | `MultiBinary`      | **Multi Processing** |
+| -------- | ------------- | ------------------ | ------------------ | ------------------ | ------------------ | -------------------- |
+| A2C      | :x:           | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:   |
+| DDPG     | :x:           | :heavy_check_mark: | :x:                | :x:                | :x:                | :x:                  |
+| DQN      | :x:           | :x:                | :heavy_check_mark: | :x:                | :x:                | :x:                  |
+| HER      | :x:           | :heavy_check_mark: | :heavy_check_mark: | :x:                | :x:                | :x:                  |
+| PPO      | :x:           | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark:   |
+| SAC      | :x:           | :heavy_check_mark: | :x:                | :x:                | :x:                | :x:                  |
+| TD3      | :x:           | :heavy_check_mark: | :x:                | :x:                | :x:                | :x:                  |
 
 
 Actions `gym.spaces`:
