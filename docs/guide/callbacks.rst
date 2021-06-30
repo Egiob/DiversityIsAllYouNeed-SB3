@@ -155,8 +155,15 @@ Stable Baselines provides you with a set of common callbacks for:
 CheckpointCallback
 ^^^^^^^^^^^^^^^^^^
 
-Callback for saving a model every ``save_freq`` steps, you must specify a log folder (``save_path``)
+Callback for saving a model every ``save_freq`` calls to ``env.step()``, you must specify a log folder (``save_path``)
 and optionally a prefix for the checkpoints (``rl_model`` by default).
+
+.. warning::
+
+  When using multiple environments, each call to  ``env.step()`` will effectively correspond to ``n_envs`` steps.
+  If you want the ``save_freq`` to be similar when using different number of environments,
+  you need to account for it using ``save_freq = max(save_freq // n_envs, 1)``.
+  The same goes for the other callbacks.
 
 
 .. code-block:: python
@@ -177,7 +184,7 @@ EvalCallback
 ^^^^^^^^^^^^
 
 Evaluate periodically the performance of an agent, using a separate test environment.
-It will save the best model if ``best_model_save_path`` folder is specified and save the evaluations results in a numpy archive (`evaluations.npz`) if ``log_path`` folder is specified.
+It will save the best model if ``best_model_save_path`` folder is specified and save the evaluations results in a numpy archive (``evaluations.npz``) if ``log_path`` folder is specified.
 
 
 .. note::
@@ -215,7 +222,7 @@ CallbackList
 ^^^^^^^^^^^^
 
 Class for chaining callbacks, they will be called sequentially.
-Alternatively, you can pass directly a list of callbacks to the `learn()` method, it will be converted automatically to a ``CallbackList``.
+Alternatively, you can pass directly a list of callbacks to the ``learn()`` method, it will be converted automatically to a ``CallbackList``.
 
 
 .. code-block:: python

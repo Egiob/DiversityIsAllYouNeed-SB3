@@ -12,7 +12,7 @@ import torch as th
 
 from stable_baselines3 import A2C, DDPG, DQN, PPO, SAC, TD3
 from stable_baselines3.common.base_class import BaseAlgorithm
-from stable_baselines3.common.identity_env import FakeImageEnv, IdentityEnv, IdentityEnvBox
+from stable_baselines3.common.envs import FakeImageEnv, IdentityEnv, IdentityEnvBox
 from stable_baselines3.common.save_util import load_from_pkl, open_path, save_to_pkl
 from stable_baselines3.common.utils import get_device
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -239,16 +239,35 @@ def test_save_load_pytorch_var(tmp_path):
     save_path = str(tmp_path / "sac_pendulum")
     model.save(save_path)
     env = model.get_env()
-    ent_coef_before = model.log_ent_coef
+    log_ent_coef_before = model.log_ent_coef
 
     del model
 
     model = SAC.load(save_path, env=env)
-    assert th.allclose(ent_coef_before, model.log_ent_coef)
+    assert th.allclose(log_ent_coef_before, model.log_ent_coef)
     model.learn(200)
-    ent_coef_after = model.log_ent_coef
+    log_ent_coef_after = model.log_ent_coef
     # Check that the entropy coefficient is still optimized
-    assert not th.allclose(ent_coef_before, ent_coef_after)
+    assert not th.allclose(log_ent_coef_before, log_ent_coef_after)
+
+    # With a fixed entropy coef
+    model = SAC("MlpPolicy", "Pendulum-v0", seed=3, ent_coef=0.01, policy_kwargs=dict(net_arch=[64], n_critics=1))
+    model.learn(200)
+    save_path = str(tmp_path / "sac_pendulum")
+    model.save(save_path)
+    env = model.get_env()
+    assert model.log_ent_coef is None
+    ent_coef_before = model.ent_coef_tensor
+
+    del model
+
+    model = SAC.load(save_path, env=env)
+    assert th.allclose(ent_coef_before, model.ent_coef_tensor)
+    model.learn(200)
+    ent_coef_after = model.ent_coef_tensor
+    assert model.log_ent_coef is None
+    # Check that the entropy coefficient is still the same
+    assert th.allclose(ent_coef_before, ent_coef_after)
 
 
 @pytest.mark.parametrize("model_class", [A2C, TD3])
@@ -289,6 +308,8 @@ def test_save_load_replay_buffer(tmp_path, model_class):
     assert np.allclose(old_replay_buffer.actions, model.replay_buffer.actions)
     assert np.allclose(old_replay_buffer.rewards, model.replay_buffer.rewards)
     assert np.allclose(old_replay_buffer.dones, model.replay_buffer.dones)
+    assert np.allclose(old_replay_buffer.timeouts, model.replay_buffer.timeouts)
+    infos = [[{"TimeLimit.truncated": truncated}] for truncated in old_replay_buffer.timeouts]
 
     # test extending replay buffer
     model.replay_buffer.extend(
@@ -297,6 +318,7 @@ def test_save_load_replay_buffer(tmp_path, model_class):
         old_replay_buffer.actions,
         old_replay_buffer.rewards,
         old_replay_buffer.dones,
+        infos,
     )
 
 

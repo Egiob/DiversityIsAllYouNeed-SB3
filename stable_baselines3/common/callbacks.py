@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import gym
 import numpy as np
 
-from stable_baselines3.common import base_class, logger  # pytype: disable=pyi-error
+from stable_baselines3.common import base_class  # pytype: disable=pyi-error
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, sync_envs_normalization
 
@@ -44,7 +44,7 @@ class BaseCallback(ABC):
         """
         self.model = model
         self.training_env = model.get_env()
-        self.logger = logger
+        self.logger = model.logger
         self._init_callback()
 
     def _init_callback(self) -> None:
@@ -212,7 +212,14 @@ class CallbackList(BaseCallback):
 
 class CheckpointCallback(BaseCallback):
     """
-    Callback for saving a model every ``save_freq`` steps
+    Callback for saving a model every ``save_freq`` calls
+    to ``env.step()``.
+
+    .. warning::
+
+      When using multiple environments, each call to  ``env.step()``
+      will effectively correspond to ``n_envs`` steps.
+      To account for that, you can use ``save_freq = max(save_freq // n_envs, 1)``
 
     :param save_freq:
     :param save_path: Path to the folder where the model will be saved.
@@ -262,11 +269,17 @@ class EvalCallback(EventCallback):
     """
     Callback for evaluating an agent.
 
+    .. warning::
+
+      When using multiple environments, each call to  ``env.step()``
+      will effectively correspond to ``n_envs`` steps.
+      To account for that, you can use ``eval_freq = max(eval_freq // n_envs, 1)``
+
     :param eval_env: The environment used for initialization
     :param callback_on_new_best: Callback to trigger
         when there is a new best model according to the ``mean_reward``
     :param n_eval_episodes: The number of episodes to test the agent
-    :param eval_freq: Evaluate the agent every eval_freq call of the callback.
+    :param eval_freq: Evaluate the agent every ``eval_freq`` call of the callback.
     :param log_path: Path to a folder where the evaluations (``evaluations.npz``)
         will be saved. It will be updated at each evaluation.
     :param best_model_save_path: Path to a folder where the best model
@@ -305,9 +318,6 @@ class EvalCallback(EventCallback):
         if not isinstance(eval_env, VecEnv):
             eval_env = DummyVecEnv([lambda: eval_env])
 
-        if isinstance(eval_env, VecEnv):
-            assert eval_env.num_envs == 1, "You must pass only one environment for evaluation"
-
         self.eval_env = eval_env
         self.best_model_save_path = best_model_save_path
         # Logs will be written in ``evaluations.npz``
@@ -342,9 +352,6 @@ class EvalCallback(EventCallback):
         :param globals_:
         """
         info = locals_["info"]
-        # VecEnv: unpack
-        if not isinstance(info, dict):
-            info = info[0]
 
         if locals_["done"]:
             maybe_is_success = info.get("is_success")

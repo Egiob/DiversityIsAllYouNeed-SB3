@@ -11,13 +11,14 @@ import gym
 import numpy as np
 import torch as th
 
-from stable_baselines3.common import logger, utils
+from stable_baselines3.common import utils
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ConvertCallback, EvalCallback
 from stable_baselines3.common.env_util import is_wrapped
+from stable_baselines3.common.logger import Logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.policies import BasePolicy, get_policy_from_name
-from stable_baselines3.common.preprocessing import is_image_space, is_image_space_channels_first
+from stable_baselines3.common.preprocessing import check_for_nested_spaces, is_image_space, is_image_space_channels_first
 from stable_baselines3.common.save_util import load_from_zip_file, recursive_getattr, recursive_setattr, save_to_zip_file
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import (
@@ -35,7 +36,6 @@ from stable_baselines3.common.vec_env import (
     is_vecenv_wrapped,
     unwrap_vec_normalize,
 )
-from stable_baselines3.common.vec_env.obs_dict_wrapper import ObsDictWrapper
 
 
 def maybe_make_env(env: Union[GymEnv, str, None], verbose: int) -> Optional[GymEnv]:
@@ -129,10 +129,10 @@ class BaseAlgorithm(ABC):
         self.learning_rate = learning_rate
         self.tensorboard_log = tensorboard_log
         self.lr_schedule = None  # type: Optional[Schedule]
-        self._last_obs = None  # type: Optional[np.ndarray]
+        self._last_obs = None  # type: Optional[Union[np.ndarray, Dict[str, np.ndarray]]]
         self._last_episode_starts = None  # type: Optional[np.ndarray]
         # When using VecNormalize:
-        self._last_original_obs = None  # type: Optional[np.ndarray]
+        self._last_original_obs = None  # type: Optional[Union[np.ndarray, Dict[str, np.ndarray]]]
         self._episode_num = 0
         # Used for gSDE only
         self.use_sde = use_sde
@@ -145,6 +145,10 @@ class BaseAlgorithm(ABC):
         self.ep_success_buffer = None  # type: Optional[deque]
         # For logging (and TD3 delayed updates)
         self._n_updates = 0  # type: int
+        # The logger object
+        self._logger = None  # type: Logger
+        # Whether the user passed a custom logger or not
+        self._custom_logger = False
 
         # Create and wrap the env if needed
         if env is not None:
@@ -195,24 +199,58 @@ class BaseAlgorithm(ABC):
                 print("Wrapping the env in a DummyVecEnv.")
             env = DummyVecEnv([lambda: env])
 
-        if (
-            is_image_space(env.observation_space)
-            and not is_vecenv_wrapped(env, VecTransposeImage)
-            and not is_image_space_channels_first(env.observation_space)
-        ):
-            if verbose >= 1:
-                print("Wrapping the env in a VecTransposeImage.")
-            env = VecTransposeImage(env)
+        # Make sure that dict-spaces are not nested (not supported)
+        check_for_nested_spaces(env.observation_space)
 
-        # check if wrapper for dict support is needed when using HER
-        if isinstance(env.observation_space, gym.spaces.dict.Dict):
-            env = ObsDictWrapper(env)
+        if isinstance(env.observation_space, gym.spaces.Dict):
+            for space in env.observation_space.spaces.values():
+                if isinstance(space, gym.spaces.Dict):
+                    raise ValueError("Nested observation spaces are not supported (Dict spaces inside Dict space).")
+
+        if not is_vecenv_wrapped(env, VecTransposeImage):
+            wrap_with_vectranspose = False
+            if isinstance(env.observation_space, gym.spaces.Dict):
+                # If even one of the keys is a image-space in need of transpose, apply transpose
+                # If the image spaces are not consistent (for instance one is channel first,
+                # the other channel last), VecTransposeImage will throw an error
+                for space in env.observation_space.spaces.values():
+                    wrap_with_vectranspose = wrap_with_vectranspose or (
+                        is_image_space(space) and not is_image_space_channels_first(space)
+                    )
+            else:
+                wrap_with_vectranspose = is_image_space(env.observation_space) and not is_image_space_channels_first(
+                    env.observation_space
+                )
+
+            if wrap_with_vectranspose:
+                if verbose >= 1:
+                    print("Wrapping the env in a VecTransposeImage.")
+                env = VecTransposeImage(env)
 
         return env
 
     @abstractmethod
     def _setup_model(self) -> None:
         """Create networks, buffer and optimizers."""
+
+    def set_logger(self, logger: Logger) -> None:
+        """
+        Setter for for logger object.
+
+        .. warning::
+
+          When passing a custom logger object,
+          this will overwrite ``tensorboard_log`` and ``verbose`` settings
+          passed to the constructor.
+        """
+        self._logger = logger
+        # User defined logger
+        self._custom_logger = True
+
+    @property
+    def logger(self) -> Logger:
+        """Getter for the logger object."""
+        return self._logger
 
     def _get_eval_env(self, eval_env: Optional[GymEnv]) -> Optional[GymEnv]:
         """
@@ -251,7 +289,7 @@ class BaseAlgorithm(ABC):
             An optimizer or a list of optimizers.
         """
         # Log the current learning rate
-        logger.record("train/learning_rate", self.lr_schedule(self._current_progress_remaining))
+        self.logger.record("train/learning_rate", self.lr_schedule(self._current_progress_remaining))
 
         if not isinstance(optimizers, list):
             optimizers = [optimizers]
@@ -275,6 +313,9 @@ class BaseAlgorithm(ABC):
             "replay_buffer",
             "rollout_buffer",
             "_vec_normalize_env",
+            "_episode_storage",
+            "_logger",
+            "_custom_logger",
         ]
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
@@ -376,7 +417,7 @@ class BaseAlgorithm(ABC):
 
         # Avoid resetting the environment when calling ``.learn()`` consecutive times
         if reset_num_timesteps or self._last_obs is None:
-            self._last_obs = self.env.reset()
+            self._last_obs = self.env.reset()  # pytype: disable=annotation-type-mismatch
             self._last_episode_starts = np.ones((self.env.num_envs,), dtype=bool)
             # Retrieve unnormalized observation for saving into the buffer
             if self._vec_normalize_env is not None:
@@ -387,8 +428,9 @@ class BaseAlgorithm(ABC):
 
         eval_env = self._get_eval_env(eval_env)
 
-        # Configure logger's outputs
-        utils.configure_logger(self.verbose, self.tensorboard_log, tb_log_name, reset_num_timesteps)
+        # Configure logger's outputs if no logger was passed
+        if not self._custom_logger:
+            self._logger = utils.configure_logger(self.verbose, self.tensorboard_log, tb_log_name, reset_num_timesteps)
 
         # Create eval callback if needed
         callback = self._init_callback(callback, eval_env, eval_freq, n_eval_episodes, log_path)
@@ -650,6 +692,13 @@ class BaseAlgorithm(ABC):
         # put other pytorch variables back in place
         if pytorch_variables is not None:
             for name in pytorch_variables:
+                # Skip if PyTorch variable was not defined (to ensure backward compatibility).
+                # This happens when using SAC/TQC.
+                # SAC has an entropy coefficient which can be fixed or optimized.
+                # If it is optimized, an additional PyTorch variable `log_ent_coef` is defined,
+                # otherwise it is initialized to `None`.
+                if pytorch_variables[name] is None:
+                    continue
                 # Set the data attribute directly to avoid issue when using optimizers
                 # See https://github.com/DLR-RM/stable-baselines3/issues/391
                 recursive_setattr(model, name + ".data", pytorch_variables[name].data)

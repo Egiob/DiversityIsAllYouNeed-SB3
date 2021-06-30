@@ -7,7 +7,7 @@ import torch as th
 from gym import spaces
 
 from stable_baselines3 import A2C, DQN, PPO, SAC, TD3
-from stable_baselines3.common.identity_env import FakeImageEnv
+from stable_baselines3.common.envs import FakeImageEnv
 from stable_baselines3.common.preprocessing import is_image_space, is_image_space_channels_first
 from stable_baselines3.common.utils import zip_strict
 from stable_baselines3.common.vec_env import VecTransposeImage, is_vecenv_wrapped
@@ -247,7 +247,12 @@ def test_image_space_checks():
     assert not is_image_space(not_image_space)
 
     an_image_space = spaces.Box(0, 255, shape=(10, 10, 3), dtype=np.uint8)
-    assert is_image_space(an_image_space)
+    assert is_image_space(an_image_space, check_channels=False)
+    assert is_image_space(an_image_space, check_channels=True)
+
+    channel_first_image_space = spaces.Box(0, 255, shape=(3, 10, 10), dtype=np.uint8)
+    assert is_image_space(channel_first_image_space, check_channels=False)
+    assert is_image_space(channel_first_image_space, check_channels=True)
 
     an_image_space_with_odd_channels = spaces.Box(0, 255, shape=(10, 10, 5), dtype=np.uint8)
     assert is_image_space(an_image_space_with_odd_channels)
