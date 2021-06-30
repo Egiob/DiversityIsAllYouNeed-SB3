@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import time
+from types import FunctionType as function
 import gym
 import numpy as np
 from numpy.core.fromnumeric import mean
@@ -20,6 +21,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.buffers import ReplayBufferZ
+from stable_baselines3.common.exp_utils import DiscriminatorFunction
 from stable_baselines3.diayn.disc import Discriminator
 
 
@@ -99,7 +101,7 @@ class DIAYN(SAC):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
-        disc_on : Union[list, str] = 'all',
+        disc_on : Union[list, str, DiscriminatorFunction] = 'all',
         combined_rewards : bool = False,
         beta: float = 0.01,
         smerl : int = None,
@@ -154,6 +156,9 @@ class DIAYN(SAC):
             disc_obs_shape = env.observation_space.shape[0]
             assert min(disc_on)>=0 and max(disc_on) < disc_obs_shape
             disc_obs_shape = len(disc_on)
+            self.disc_on = disc_on
+        elif isinstance(disc_on, DiscriminatorFunction):
+            disc_obs_shape = disc_on.output_size
             self.disc_on = disc_on
         self.discriminator = Discriminator(disc_obs_shape, prior, hidden_sizes, device=self.device)
         self.log_p_z = prior.logits.detach().cpu().numpy()
@@ -322,7 +327,11 @@ class DIAYN(SAC):
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
             #print(replay_data.next_observations)
-            disc_obs = replay_data.next_observations[:,self.disc_on]
+            if isinstance(self.disc_on, DiscriminatorFunction):
+                disc_obs = self.disc_on(replay_data.next_observations)
+
+            else:
+                disc_obs = replay_data.next_observations[:,self.disc_on]
             log_q_phi = self.discriminator(disc_obs.to(self.device)).to(self.device)
             #z = self.prior.sample([log_q_phi.shape[0],]).to(self.device)
             z = replay_data.zs.to(self.device)
@@ -366,7 +375,7 @@ class DIAYN(SAC):
         callback.on_training_start(locals(), globals())
 
         while self.num_timesteps < total_timesteps:
-            z = self.prior.sample()
+            z = self.prior.sample().to(self.device)
             rollout = self.collect_rollouts(
                 self.env,
                 train_freq=self.train_freq,
@@ -469,14 +478,19 @@ class DIAYN(SAC):
 
                 #diayn reward computed from discriminator
                 #print(new_obs[:,self.disc_on])
-                log_q_phi = self.discriminator(new_obs[:,self.disc_on])[:,z.argmax()].detach().cpu().numpy()
+                if isinstance(self.disc_on, DiscriminatorFunction):
+                    disc_obs = self.disc_on(new_obs)
+
+                else:
+                    disc_obs = new_obs[:,self.disc_on]
+                log_q_phi = self.discriminator(disc_obs)[:,z.argmax()].detach().cpu().numpy()
                 if isinstance(self.log_p_z, th.Tensor):
                     self.log_p_z = self.log_p_z.cpu().numpy()
                 diayn_reward =  log_q_phi - self.log_p_z[z.argmax()]
-
+                z_idx = np.argmax(z.cpu())
                 if self.combined_rewards:
                     if self.beta == 'auto':
-                        z_idx = np.argmax(z)
+                        
                         mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer]
                         mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
                         mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
@@ -493,7 +507,6 @@ class DIAYN(SAC):
                         self.beta_buffer.append(betas)
 
                     elif self.smerl:
-                        z_idx = np.argmax(z)
                         mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
 
                         #print(mean_true_reward)
@@ -535,7 +548,6 @@ class DIAYN(SAC):
                     #print(info)
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
-                        z_idx = np.argmax(z)
                         for i in range(self.prior.event_shape[0]):
                             maybe_ep_info[f'r_diayn_{i}'] = np.nan
                             maybe_ep_info[f'r_true_{i}'] = np.nan

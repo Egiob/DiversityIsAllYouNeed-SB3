@@ -2,16 +2,30 @@ import numpy as np
 import torch as th
 from scipy.spatial.distance import jensenshannon as jsd
 from stable_baselines3.common.vec_env import VecVideoRecorder, DummyVecEnv
-from stable_baselines3 import DIAYN
 import gym
 import pandas as pd
 import os
 from stable_baselines3.common.model_serializer import ModelSerializer
+from types import FunctionType as function
 
+class DiscriminatorFunction:
+    def __init__(self, f, name, output_size, env=""):
+        self.env = env
+        self.name = name
+        self.f = f
+        self.output_size = output_size
+        
+    def __call__(self, obs):
+        return self.f(obs)
 
 def get_paths(env_id, n_skills, prior, train_freq, t_start, t_end, gradient_steps, buffer_size, disc_on, seed, ent_coef, combined_rewards, beta, smerl, eps, model_prefix=""):
     train_freq_name = "".join([str(x)[:2] for x in train_freq])
-    disc_on_name = "".join([str(x) for x in disc_on])
+    if isinstance(disc_on, DiscriminatorFunction):
+        disc_on_name = disc_on.name
+    else:
+        disc_on_name = "".join([str(x) for x in disc_on])
+        if len(disc_on_name) > 5:
+            disc_on_name = disc_on_name[:3] + "..." + disc_on_name[-3:]
     if smerl:
         smerl_name = f"smerl-{smerl}__eps-{eps}"
     else:
@@ -91,10 +105,9 @@ def compute_jsd(states_1, states_2, model, bins=50, states=True):
     return jsd_l
 
 
-def record_skills(env_id, model_path, directory, name_prefix="", video_length=400):
-
+def record_skills(env_id, model, directory, name_prefix="", video_length=400):
+    
     env = DummyVecEnv([lambda: gym.make(env_id)])
-    model = DIAYN.load(model_path, env)
     prior = model.prior
     k=0
     for z in prior.enumerate_support():

@@ -4,6 +4,7 @@ from mlagents.torch_utils import torch
 from mlagents.trainers.torch.model_serialization import TensorNames
 from mlagents_envs.logging_util import get_logger
 from mlagents.trainers.settings import SerializationSettings
+from stable_baselines3.common.distributions import SquashedDiagGaussianDistributionONNXable
 
 
 logger = get_logger(__name__)
@@ -46,6 +47,10 @@ class SACOnnxablePolicy(torch.nn.Module):
         super(SACOnnxablePolicy, self).__init__()
         
         # Removing the flatten layer because it can't be onnxed
+        self.latent_pi = actor.latent_pi
+        self.mu = actor.mu
+        self.std = actor.log_std
+        self.dist = SquashedDiagGaussianDistributionONNXable(20)
         self.actor = torch.nn.Sequential(actor.latent_pi, actor.mu)
 
     def forward(self, input_):
@@ -59,7 +64,10 @@ class SACOnnxablePolicy(torch.nn.Module):
         memory = torch.nn.Parameter(torch.Tensor([0]), requires_grad=False)
         is_continuous_control = torch.nn.Parameter(torch.Tensor([1]), requires_grad=False)
         export_out += [version, memory]
-        action = self.actor(input_).detach()
+        pi = self.latent_pi(input_)
+        mu = self.mu(pi)
+        log_std = self.std(pi)
+        action = self.dist.actions_from_params(mu, log_std, deterministic=True)
         action_sum = action.shape[-1].item()
         action_size =  torch.nn.Parameter(torch.Tensor([action_sum]),requires_grad=False)
         export_out += [action, action_size]
