@@ -71,6 +71,18 @@ class DIAYN(SAC):
     :param device: Device (cpu, cuda, ...) on which the code should be run.
         Setting it to auto, the code will be run on the GPU if possible.
     :param _init_setup_model: Whether or not to build the network at the creation of the instance
+    :param disc_on: A list of index, or a DiscriminatorFunction or 'all'. It designates which component or
+        transformation of the state space you want to pass to the discriminator.
+    :param combined_rewards: whether or not you want to learn the task AND learn skills, by default this is
+        False in DIAYN (unsupervised method).
+    :param beta: balance parameter between the true and the diayn reward, beta = 0 means only the true reward
+        is considered while beta = 1 means it's only the diversity reward. Only active when combined_rewards
+        is set to True. beta = "auto" is incompatible with smerl.
+    :param smerl: if not None, it sets the target value for SMERL algorithm, see https://arxiv.org/pdf/2010.14484.pdf
+    :param eps: if smerl is not None, it sets the margin of the reward where under esp*smerl, DIAYN reward is
+        set to 0.
+    :param beta_temp: only if beta='auto', sets the temperature parameter of the sigmoid for beta computation.
+    :patam beta_momentum: only if beta='auto', sets the momentum parameter for beta auto update.
     """
 
     def __init__(
@@ -149,6 +161,9 @@ class DIAYN(SAC):
         #Initialization of the discriminator
         #TODO : hidden_sizes in params
         hidden_sizes = [30, 30]
+
+        assert (disc_on=='all' or isinstance(disc_on, list) or isinstance(disc_on, DiscriminatorFunction),
+                "Please pass a valid value for disc_on parameter")
         if disc_on == 'all':
             self.disc_on = ...
             disc_obs_shape = env.observation_space.shape[0]
@@ -160,6 +175,8 @@ class DIAYN(SAC):
         elif isinstance(disc_on, DiscriminatorFunction):
             disc_obs_shape = disc_on.output_size
             self.disc_on = disc_on
+
+        
         self.discriminator = Discriminator(disc_obs_shape, prior, hidden_sizes, device=self.device)
         self.log_p_z = prior.logits.detach().cpu().numpy()
         self.prior = prior
@@ -173,9 +190,10 @@ class DIAYN(SAC):
             if self.beta == 'auto':
                 self.beta_momentum = beta_momentum
                 self.beta_temp = beta_temp
-
         if smerl:
             assert beta != 'auto', "You must chose between SMERL and beta=\"auto\""
+
+
         if _init_setup_model:
             self._setup_model()
 
@@ -256,8 +274,8 @@ class DIAYN(SAC):
                 self.actor.reset_noise()
 
             # Action by the current actor for the sampled state
+            # We concatenate state with current one hot encoded skill
             obs = th.cat([replay_data.observations, replay_data.zs],dim=1)
-            #print(obs)
             actions_pi, log_prob = self.actor.action_log_prob(obs)
             log_prob = log_prob.reshape(-1, 1)
 
@@ -283,6 +301,7 @@ class DIAYN(SAC):
 
             with th.no_grad():
                 # Select action according to policy
+                # We concatenate next state with current one hot encoded skill
                 new_obs = th.cat([replay_data.next_observations, replay_data.zs],dim=1)
                 next_actions, next_log_prob = self.actor.action_log_prob(new_obs)
                 # Compute the next Q values: min over all critics targets
@@ -298,7 +317,6 @@ class DIAYN(SAC):
 
             
 
-            
             current_q_values = self.critic(obs, replay_data.actions)
 
             # Compute critic loss
@@ -326,16 +344,16 @@ class DIAYN(SAC):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-            #print(replay_data.next_observations)
+
+            # Get or compute vector to pass to the discriminator
             if isinstance(self.disc_on, DiscriminatorFunction):
                 disc_obs = self.disc_on(replay_data.next_observations)
-
             else:
                 disc_obs = replay_data.next_observations[:,self.disc_on]
+
+            
             log_q_phi = self.discriminator(disc_obs.to(self.device)).to(self.device)
-            #z = self.prior.sample([log_q_phi.shape[0],]).to(self.device)
             z = replay_data.zs.to(self.device)
-            #print(log_q_phi)
             discriminator_loss = th.nn.NLLLoss()(log_q_phi, z.argmax(dim=1))
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
@@ -344,7 +362,7 @@ class DIAYN(SAC):
             
 
         self._n_updates += gradient_steps
-        #print("train")
+
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         logger.record("train/ent_coef", np.mean(ent_coefs))
         logger.record("train/actor_loss", np.mean(actor_losses))
@@ -375,6 +393,7 @@ class DIAYN(SAC):
         callback.on_training_start(locals(), globals())
 
         while self.num_timesteps < total_timesteps:
+            #sample skill z according to prior before generating episode
             z = self.prior.sample().to(self.device)
             rollout = self.collect_rollouts(
                 self.env,
@@ -397,7 +416,6 @@ class DIAYN(SAC):
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
 
         callback.on_training_end()
-
         return self
 
     def _excluded_save_params(self) -> List[str]:
@@ -429,6 +447,7 @@ class DIAYN(SAC):
         Collect experiences and store them into a ``ReplayBuffer``.
 
         :param env: The training environment
+        :param z: The one hot encoding of the active skill
         :param callback: Callback that will be called at each step
             (and at the beginning and end of the rollout)
         :param train_freq: How much experience to collect
@@ -476,21 +495,25 @@ class DIAYN(SAC):
                 new_obs, true_reward, done, infos = env.step(action)
                 done = done[0]
 
-                #diayn reward computed from discriminator
-                #print(new_obs[:,self.disc_on])
-                if isinstance(self.disc_on, DiscriminatorFunction):
-                    disc_obs = self.disc_on(new_obs)
 
+                if isinstance(self.disc_on, DiscriminatorFunction):
+                   disc_obs = self.disc_on(new_obs)
                 else:
                     disc_obs = new_obs[:,self.disc_on]
+
+                
                 log_q_phi = self.discriminator(disc_obs)[:,z.argmax()].detach().cpu().numpy()
+
                 if isinstance(self.log_p_z, th.Tensor):
                     self.log_p_z = self.log_p_z.cpu().numpy()
+                
                 diayn_reward =  log_q_phi - self.log_p_z[z.argmax()]
+
                 z_idx = np.argmax(z.cpu())
+
+                # beta update and logging
                 if self.combined_rewards:
                     if self.beta == 'auto':
-                        
                         mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}") for ep_info in self.ep_info_buffer]
                         mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
                         mean_true_reward = [ep_info.get(f"r_true_{z_idx}") for ep_info in self.ep_info_buffer]
@@ -500,7 +523,7 @@ class DIAYN(SAC):
                         if np.isnan(mean_diayn_reward):
                             mean_diayn_reward = 0.
                         last_beta = self.beta_buffer[-1][z_idx]
-                        beta = sigm((mean_true_reward-3*mean_diayn_reward)/self.beta_temp) * (1-self.beta_momentum) + last_beta * self.beta_momentum
+                        beta = sigm((mean_true_reward-mean_diayn_reward)/self.beta_temp) * (1-self.beta_momentum) + last_beta * self.beta_momentum
                         reward = beta * diayn_reward + (1-beta) * true_reward
                         betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta
@@ -518,6 +541,7 @@ class DIAYN(SAC):
                         betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta_on
                         self.beta_buffer.append(betas)
+                        #add beta*diayn_reward if mean_reward is closer than espilon*smerl to smerl
                         reward = self.beta * diayn_reward * beta_on + true_reward
                     else:       
                         reward = self.beta * diayn_reward + true_reward
@@ -527,8 +551,6 @@ class DIAYN(SAC):
                 else:
                     reward = diayn_reward
 
-
-                
                 self.num_timesteps += 1
                 episode_timesteps += 1
                 num_collected_steps += 1
@@ -617,6 +639,7 @@ class DIAYN(SAC):
         :param done: Termination signal
         :param infos: List of additional information about the transition.
             It contains the terminal observations.
+        :param z: The active skill
         """
         # Store only the unnormalized version
         if self._vec_normalize_env is not None:
@@ -656,6 +679,7 @@ class DIAYN(SAC):
             Required for deterministic policy (e.g. TD3). This can also be used
             in addition to the stochastic policy for SAC.
         :param learning_starts: Number of steps before learning for the warm-up phase.
+        :param z: The active skill to sample from.
         :return: action to take in the environment
             and scaled action that will be stored in the replay buffer.
             The two differs when the action space is not normalized (bounds are not [-1, 1]).
