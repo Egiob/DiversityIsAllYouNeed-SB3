@@ -3,10 +3,29 @@ import numpy as np
 import gym
 import torch as th
 from torch import nn
-from stable_baselines3.common.preprocessing import get_action_dim, maybe_transpose, preprocess_obs
-from stable_baselines3.common.vec_env.obs_dict_wrapper import ObsDictWrapper
-from stable_baselines3.common.distributions import SquashedDiagGaussianDistribution, StateDependentNoiseDistribution
-from stable_baselines3.common.policies import BasePolicy, ContinuousCritic, create_sde_features_extractor, register_policy
+
+from stable_baselines3.common.preprocessing import (
+    get_action_dim,
+    is_image_space,
+    maybe_transpose,
+    preprocess_obs,
+)
+import copy
+from stable_baselines3.common.utils import (
+    get_device,
+    is_vectorized_observation,
+    obs_as_tensor,
+)
+from stable_baselines3.common.distributions import (
+    SquashedDiagGaussianDistribution,
+    StateDependentNoiseDistribution,
+)
+from stable_baselines3.common.policies import (
+    BasePolicy,
+    ContinuousCritic,
+    create_sde_features_extractor,
+    register_policy,
+)
 from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import (
     BaseFeaturesExtractor,
@@ -17,7 +36,6 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.sac.policies import Actor
-
 
 
 # CAP the standard deviation of the actor
@@ -115,7 +133,6 @@ class DIAYNPolicy(BasePolicy):
             "clip_mean": clip_mean,
         }
 
-    
         self.actor_kwargs.update(sde_kwargs)
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
@@ -134,13 +151,21 @@ class DIAYNPolicy(BasePolicy):
 
     def _build(self, lr_schedule: Schedule) -> None:
         self.actor = self.make_actor()
-        self.actor.optimizer = self.optimizer_class(self.actor.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+        self.actor.optimizer = self.optimizer_class(
+            self.actor.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs
+        )
 
         if self.share_features_extractor:
-            self.critic = self.make_critic(features_extractor=self.actor.features_extractor)
+            self.critic = self.make_critic(
+                features_extractor=self.actor.features_extractor
+            )
             # Do not optimize the shared features extractor with the critic loss
             # otherwise, there are gradient computation issues
-            critic_parameters = [param for name, param in self.critic.named_parameters() if "features_extractor" not in name]
+            critic_parameters = [
+                param
+                for name, param in self.critic.named_parameters()
+                if "features_extractor" not in name
+            ]
         else:
             # Create a separate features extractor for the critic
             # this requires more memory and computation
@@ -151,7 +176,9 @@ class DIAYNPolicy(BasePolicy):
         self.critic_target = self.make_critic(features_extractor=None)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        self.critic.optimizer = self.optimizer_class(critic_parameters, lr=lr_schedule(1), **self.optimizer_kwargs)
+        self.critic.optimizer = self.optimizer_class(
+            critic_parameters, lr=lr_schedule(1), **self.optimizer_kwargs
+        )
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
@@ -183,20 +210,30 @@ class DIAYNPolicy(BasePolicy):
         """
         self.actor.reset_noise(batch_size=batch_size)
 
-    def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> Actor:
-        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
-        actor_kwargs['features_dim'] += self.n_skills
+    def make_actor(
+        self, features_extractor: Optional[BaseFeaturesExtractor] = None
+    ) -> Actor:
+        actor_kwargs = self._update_features_extractor(
+            self.actor_kwargs, features_extractor
+        )
+        actor_kwargs["features_dim"] += self.n_skills
         return Actor(**actor_kwargs).to(self.device)
 
-    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
-        critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        critic_kwargs['features_dim'] += self.n_skills
+    def make_critic(
+        self, features_extractor: Optional[BaseFeaturesExtractor] = None
+    ) -> ContinuousCritic:
+        critic_kwargs = self._update_features_extractor(
+            self.critic_kwargs, features_extractor
+        )
+        critic_kwargs["features_dim"] += self.n_skills
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         return self._predict(obs, deterministic=deterministic)
 
-    def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
+    def _predict(
+        self, observation: th.Tensor, deterministic: bool = False
+    ) -> th.Tensor:
         return self.actor(observation, deterministic)
 
     def predict(
@@ -222,9 +259,28 @@ class DIAYNPolicy(BasePolicy):
         #     state = self.initial_state
         # if mask is None:
         #     mask = [False for _ in range(self.n_envs)]
-        
+
         if isinstance(observation, dict):
-            observation = ObsDictWrapper.convert_dict(observation)
+            # need to copy the dict as the dict in VecFrameStack will become a torch tensor
+            observation = copy.deepcopy(observation)
+            for key, obs in observation.items():
+                obs_space = self.observation_space.spaces[key]
+                if is_image_space(obs_space):
+                    obs_ = maybe_transpose(obs, obs_space)
+                else:
+                    obs_ = np.array(obs)
+                vectorized_env = vectorized_env or is_vectorized_observation(
+                    obs_, obs_space
+                )
+                # Add batch dimension if needed
+                observation[key] = obs_.reshape(
+                    (-1,) + self.observation_space[key].shape
+                )
+
+        elif is_image_space(self.observation_space):
+            # Handle the different cases for images
+            # as PyTorch use channel first format
+            observation = maybe_transpose(observation, self.observation_space)
         else:
             observation = np.array(observation)
 
@@ -232,12 +288,12 @@ class DIAYNPolicy(BasePolicy):
         # as PyTorch use channel first format
         observation = maybe_transpose(observation, self.observation_space)
 
-        #vectorized_env = is_vectorized_observation(observation, self.observation_space)
+        # vectorized_env = is_vectorized_observation(observation, self.observation_space)
         vectorized_env = True
         obs_shape = list(self.observation_space.shape)
         z_size = self.prior.event_shape[0]
-        obs_shape[0] += z_size #for z dimension
-        observation = observation.reshape([-1,] + obs_shape ) 
+        obs_shape[0] += z_size  # for z dimension
+        observation = observation.reshape([-1,] + obs_shape)
 
         observation = th.as_tensor(observation).to(self.device)
         with th.no_grad():
@@ -252,11 +308,15 @@ class DIAYNPolicy(BasePolicy):
             else:
                 # Actions could be on arbitrary scale, so clip the actions to avoid
                 # out of bound error (e.g. if sampling from a Gaussian distribution)
-                actions = np.clip(actions, self.action_space.low, self.action_space.high)
+                actions = np.clip(
+                    actions, self.action_space.low, self.action_space.high
+                )
 
         if not vectorized_env:
             if state is not None:
-                raise ValueError("Error: The environment must be vectorized when using recurrent policies.")
+                raise ValueError(
+                    "Error: The environment must be vectorized when using recurrent policies."
+                )
             actions = actions[0]
 
         return actions, state
@@ -334,8 +394,6 @@ class CnnPolicy(DIAYNPolicy):
             n_critics,
             share_features_extractor,
         )
-
-    
 
 
 register_policy("MlpPolicy", MlpPolicy)
