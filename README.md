@@ -18,6 +18,57 @@ The DIAYN implementation follows the API of the other algorithms in SB3 and spec
 - Generation of skills from a skill distribution defined by a prior (only categorical uniform is supported from now) in an unsupervised manner.
 - SMERL algorithm that allow to learn diverse skills that solve the given task as well as being different from each other (see [paper](https://arxiv.org/pdf/2010.14484.pdf)). 
 
+## Example
+**Imports**
+
+
+```python3
+import torch
+import gym
+from stable_baselines3 import DIAYN
+```
+
+**Definition**
+```python3
+env_id = "Pendulum-v0"
+env = gym.make(env_id)
+
+n_skills = 5 #I want to generate 5 different skills
+prior = torch.distributions.OneHotCategorical(probs = 1/n_skills * torch.ones(n_skills)) #the prior is set to uniform categorical (ie. 1/5 for each skill)
+
+model = DIAYN(policy="MlpPolicy",
+              env=env,
+              prior=prior,
+              disc_on='all', #default : use raw state vector to feed the discriminator
+              train_freq=(1, 'episode'), #default : train (and sample a new skill) at each episode
+              gradient_steps=10 #make 10 gradient updates in a single training phase (default is len(episode) but it is often too much) 
+              )
+
+
+```
+**Training**
+```python3
+model.learn(total_timesteps=1e5)
+```
+
+**Save model**
+
+```python3
+model.save("my_path")
+```
+**Load model**
+```python3
+model = DIAYN.load("my_path", gym_env)
+```
+**Bonus : generate trajectories according to your skills**
+```python3
+from stable_baselines3.common.exp_utils import generate_trajectory
+
+skill_idx = 0 #index of the skill you want to use
+max_steps = 100 #maximum steps of an episode
+trajectory = generate_trajectory(model, skill_idx, max_steps, return_actions=False)
+```
+
 # Stable Baselines3
 
 Stable Baselines3 (SB3) is a set of reliable implementations of reinforcement learning algorithms in PyTorch. It is the next major version of [Stable Baselines](https://github.com/hill-a/stable-baselines).
