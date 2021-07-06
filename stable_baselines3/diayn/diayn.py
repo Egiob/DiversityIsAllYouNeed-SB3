@@ -40,7 +40,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.buffers import ReplayBufferZ
 from stable_baselines3.common.exp_utils import DiscriminatorFunction
 from stable_baselines3.diayn.disc import Discriminator
-
+from stable_baselines3.common.utils import get_linear_fn
 
 class DIAYN(SAC):
     """
@@ -229,7 +229,7 @@ class DIAYN(SAC):
             self.device,
             optimize_memory_usage=self.optimize_memory_usage,
         )
-
+        print(self.policy_class)
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             self.observation_space,
             self.action_space,
@@ -279,7 +279,6 @@ class DIAYN(SAC):
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Update optimizers learning rate
-
         optimizers = [self.actor.optimizer, self.critic.optimizer]
         if self.ent_coef_optimizer is not None:
             optimizers += [self.ent_coef_optimizer]
@@ -457,7 +456,7 @@ class DIAYN(SAC):
                     if self.gradient_steps > 0
                     else rollout.episode_timesteps
                 )
-                # print(self.num_timesteps)
+                
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
 
         callback.on_training_end()
