@@ -131,6 +131,7 @@ class DIAYN(SAC):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         disc_on: Union[list, str, DiscriminatorFunction] = "all",
+        discriminator_kwargs: dict = {},
         combined_rewards: bool = False,
         beta: float = 0.01,
         smerl: int = None,
@@ -174,8 +175,9 @@ class DIAYN(SAC):
         self.ent_coef_optimizer = None
 
         # Initialization of the discriminator
-        # TODO : hidden_sizes in params
-        hidden_sizes = [30, 30]
+        if discriminator_kwargs.get('net_arch') is None:
+            discriminator_kwargs['net_arch'] =  [30, 30]
+
 
         assert (
             disc_on == "all"
@@ -196,7 +198,7 @@ class DIAYN(SAC):
             self.disc_on = disc_on
 
         self.discriminator = Discriminator(
-            disc_obs_shape, prior, hidden_sizes, device=self.device
+            disc_obs_shape, prior, device=self.device, **discriminator_kwargs
         )
         self.log_p_z = prior.logits.detach().cpu().numpy()
         self.prior = prior

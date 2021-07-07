@@ -771,7 +771,4 @@ class BaseAlgorithm(ABC):
 
         # Build dict of state_dicts
         params_to_save = self.get_parameters()
-        print(data)
-        print(pytorch_variables)
-        print(params_to_save)
         save_to_zip_file(path, data=data, params=params_to_save, pytorch_variables=pytorch_variables)

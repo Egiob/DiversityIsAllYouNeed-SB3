@@ -111,7 +111,6 @@ class DIAYNPolicy(BasePolicy):
                 net_arch = [256, 256]
             else:
                 net_arch = []
-
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
         self.prior = prior
         self.n_skills = prior.event_shape[0]
