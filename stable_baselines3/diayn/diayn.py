@@ -40,7 +40,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.buffers import ReplayBufferZ
 from stable_baselines3.common.exp_utils import DiscriminatorFunction
 from stable_baselines3.diayn.disc import Discriminator
-
+from stable_baselines3.common.utils import get_linear_fn
 
 class DIAYN(SAC):
     """
@@ -131,6 +131,7 @@ class DIAYN(SAC):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         disc_on: Union[list, str, DiscriminatorFunction] = "all",
+        discriminator_kwargs: dict = {},
         combined_rewards: bool = False,
         beta: float = 0.01,
         smerl: int = None,
@@ -174,8 +175,9 @@ class DIAYN(SAC):
         self.ent_coef_optimizer = None
 
         # Initialization of the discriminator
-        # TODO : hidden_sizes in params
-        hidden_sizes = [30, 30]
+        if discriminator_kwargs.get('net_arch') is None:
+            discriminator_kwargs['net_arch'] =  [30, 30]
+
 
         assert (
             disc_on == "all"
@@ -196,7 +198,7 @@ class DIAYN(SAC):
             self.disc_on = disc_on
 
         self.discriminator = Discriminator(
-            disc_obs_shape, prior, hidden_sizes, device=self.device
+            disc_obs_shape, prior, device=self.device, **discriminator_kwargs
         )
         self.log_p_z = prior.logits.detach().cpu().numpy()
         self.prior = prior
@@ -229,7 +231,7 @@ class DIAYN(SAC):
             self.device,
             optimize_memory_usage=self.optimize_memory_usage,
         )
-
+        print(self.policy_class)
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             self.observation_space,
             self.action_space,
@@ -279,7 +281,6 @@ class DIAYN(SAC):
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Update optimizers learning rate
-
         optimizers = [self.actor.optimizer, self.critic.optimizer]
         if self.ent_coef_optimizer is not None:
             optimizers += [self.ent_coef_optimizer]
@@ -457,7 +458,7 @@ class DIAYN(SAC):
                     if self.gradient_steps > 0
                     else rollout.episode_timesteps
                 )
-                # print(self.num_timesteps)
+                
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
 
         callback.on_training_end()

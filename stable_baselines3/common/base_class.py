@@ -727,7 +727,7 @@ class BaseAlgorithm(ABC):
     def save(
         self,
         path: Union[str, pathlib.Path, io.BufferedIOBase],
-        exclude: Optional[Iterable[str]] = None,
+        exclude: Optional[Iterable[str]] = ['beta_buffer','ep_info_buffer'],
         include: Optional[Iterable[str]] = None,
     ) -> None:
         """
@@ -771,5 +771,4 @@ class BaseAlgorithm(ABC):
 
         # Build dict of state_dicts
         params_to_save = self.get_parameters()
-
         save_to_zip_file(path, data=data, params=params_to_save, pytorch_variables=pytorch_variables)

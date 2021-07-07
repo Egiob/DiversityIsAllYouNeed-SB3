@@ -7,6 +7,7 @@ import pandas as pd
 import os
 from stable_baselines3.common.model_serializer import ModelSerializer
 from types import FunctionType as function
+from typing import Callable
 
 class DiscriminatorFunction:
     def __init__(self, f, name, output_size, env=""):
@@ -339,3 +340,50 @@ def export_to_onnx(model, save_path):
     modese = ModelSerializer(model.policy)
     modese.export_policy_model(save_path)
     
+
+def linear_schedule(initial_value: float, final_value: float, end: float = 0) -> Callable[[float], float]:
+    """
+    Linear learning rate schedule.
+
+    :param initial_value: Initial learning rate.
+    :param final_value: Final learning rate
+    :param end: Progress remaining where final value will be reached.
+    :return: schedule that computes
+        current learning rate depending on remaining progress
+    """
+    assert 0<end<1
+    def func(progress_remaining: float) -> float:
+        """
+        Progress will decrease from 1 (beginning) to 0.
+
+        :param progress_remaining:
+        :return: current learning rate
+        """
+        if progress_remaining < end:
+            lr = final_value
+        else:
+            x0 = end
+            x1 = 1
+            y0 = final_value
+            y1 = initial_value
+            a = (y1-y0)/(x1-x0)
+            b = y1-a*x1
+            
+            lr = a*progress_remaining+b       
+        return lr
+
+    return func
+
+def multi_step_schedule(values, milestones):
+    mlst = np.array(milestones)
+    assert (mlst[::-1] == np.sort(mlst)).all()
+    assert ((mlst<1)&(mlst>0)).all()
+
+    def func(progress_remaining: float) -> float:
+        if len(mlst[progress_remaining < mlst]) > 0:
+           idx = np.argmin(mlst[progress_remaining < mlst])
+        else:
+            idx = -1
+        return values[idx+1]
+
+    return func
