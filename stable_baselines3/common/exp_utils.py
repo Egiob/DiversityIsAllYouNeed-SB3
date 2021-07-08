@@ -376,12 +376,13 @@ def linear_schedule(initial_value: float, final_value: float, end: float = 0) ->
 
 def multi_step_schedule(values, milestones):
     mlst = np.array(milestones)
+    values = np.array(values)
     assert (mlst[::-1] == np.sort(mlst)).all()
     assert ((mlst<1)&(mlst>0)).all()
 
     def func(progress_remaining: float) -> float:
         if len(mlst[progress_remaining < mlst]) > 0:
-           idx = np.argmin(mlst[progress_remaining < mlst])
+            idx = np.argmin(mlst[progress_remaining < mlst])
         else:
             idx = -1
         return values[idx+1]
