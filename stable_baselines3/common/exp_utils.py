@@ -425,6 +425,7 @@ def linear_schedule(
 
 def multi_step_schedule(values, milestones):
     mlst = np.array(milestones)
+    values = np.array(values)
     assert (mlst[::-1] == np.sort(mlst)).all()
     assert ((mlst < 1) & (mlst > 0)).all()
 
