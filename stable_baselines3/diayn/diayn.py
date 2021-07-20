@@ -196,6 +196,7 @@ class DIAYN(SAC):
         elif isinstance(disc_on, DiscriminatorFunction):
             disc_obs_shape = disc_on.output_size
             self.disc_on = disc_on
+        
 
         self.discriminator = Discriminator(
             disc_obs_shape, prior, device=self.device, **discriminator_kwargs
@@ -231,7 +232,7 @@ class DIAYN(SAC):
             self.device,
             optimize_memory_usage=self.optimize_memory_usage,
         )
-        print(self.policy_class)
+        #print(self.policy_class)
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             self.observation_space,
             self.action_space,
@@ -304,6 +305,7 @@ class DIAYN(SAC):
             # Action by the current actor for the sampled state
             # We concatenate state with current one hot encoded skill
             obs = th.cat([replay_data.observations, replay_data.zs], dim=1)
+            #print("Zs :",replay_data.zs)
             actions_pi, log_prob = self.actor.action_log_prob(obs)
             log_prob = log_prob.reshape(-1, 1)
 
@@ -385,9 +387,9 @@ class DIAYN(SAC):
 
             # Get or compute vector to pass to the discriminator
             if isinstance(self.disc_on, DiscriminatorFunction):
-                disc_obs = self.disc_on(replay_data.next_observations)
+                disc_obs = self.disc_on(replay_data.observations)
             else:
-                disc_obs = replay_data.next_observations[:, self.disc_on]
+                disc_obs = replay_data.observations[:, self.disc_on]
 
             log_q_phi = self.discriminator(disc_obs.to(self.device)).to(self.device)
             z = replay_data.zs.to(self.device)
@@ -560,9 +562,9 @@ class DIAYN(SAC):
                     self.discriminator(disc_obs)[:, z.argmax()].detach().cpu().numpy()
                 )
 
+
                 if isinstance(self.log_p_z, th.Tensor):
                     self.log_p_z = self.log_p_z.cpu().numpy()
-
                 diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
 
                 z_idx = np.argmax(z.cpu())
@@ -607,7 +609,7 @@ class DIAYN(SAC):
                             for ep_info in self.ep_info_buffer
                         ]
 
-                        # print(mean_true_reward)
+
                         mean_true_reward = safe_mean(
                             mean_true_reward, where=~np.isnan(mean_true_reward)
                         )
@@ -618,13 +620,13 @@ class DIAYN(SAC):
                             (
                                 mean_true_reward
                                 >= self.smerl - np.abs(self.eps * self.smerl)
-                            )
+                            ) * self.beta
                         )
                         betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta_on
                         self.beta_buffer.append(betas)
                         # add beta*diayn_reward if mean_reward is closer than espilon*smerl to smerl
-                        reward = self.beta * diayn_reward * beta_on + true_reward
+                        reward =  diayn_reward * beta_on + true_reward
                     else:
                         reward = self.beta * diayn_reward + true_reward
 
@@ -653,7 +655,7 @@ class DIAYN(SAC):
 
                 # Retrieve reward and episode length if using Monitor wrapper
                 for idx, info in enumerate(infos):
-                    # print(info)
+                    #print("Before",info)
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
                         for i in range(self.prior.event_shape[0]):
@@ -665,7 +667,7 @@ class DIAYN(SAC):
                         maybe_ep_info[f"r_diayn_{z_idx}"] = diayn_episode_reward[0]
                         maybe_ep_info[f"r_true_{z_idx}"] = true_episode_reward[0]
                         maybe_ep_info["r"] = observed_episode_reward[0]
-                        # print(info)
+                        #print("After",info)
 
                 self._update_info_buffer(infos, done)
 
@@ -707,6 +709,7 @@ class DIAYN(SAC):
             np.mean(diayn_episode_rewards) if num_collected_episodes > 0 else 0.0
         )
         callback.on_rollout_end()
+        #print(diayn_episode_rewards)
         return RolloutReturnZ(
             diayn_mean_reward,
             num_collected_steps,
@@ -931,28 +934,32 @@ class DIAYN(SAC):
                 safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]),
             )
             for i in range(self.prior.event_shape[0]):
-                mean_diayn_reward = [
+                mean_diayn_reward = np.array([
                     ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer
-                ]
-                # print(mean_diayn_reward)
+                ])
+
                 mean_diayn_reward = safe_mean(
                     mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
                 )
+
                 if np.isnan(mean_diayn_reward):
                     mean_diayn_reward = 0.0
+                    
                 self.logger.record(
                     f"diayn/ep_diayn_reward_mean_skill_{i}", mean_diayn_reward
                 )
 
-                mean_true_reward = [
+                mean_true_reward = np.array([
                     ep_info.get(f"r_true_{i}") for ep_info in self.ep_info_buffer
-                ]
+                ])
 
                 mean_true_reward = safe_mean(
                     mean_true_reward, where=~np.isnan(mean_true_reward)
                 )
                 if np.isnan(mean_true_reward):
+                    print("Mean reward is Nan")
                     mean_true_reward = 0.0
+
                 self.logger.record(
                     f"diayn/ep_true_reward_mean_skill_{i}", mean_true_reward
                 )

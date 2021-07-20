@@ -54,7 +54,7 @@ class NeuralNetwork(nn.Sequential):
 class Discriminator(nn.Module):
 
     """Estimate log p(z | s)."""
-    def __init__(self, disc_obs_shape, prior, net_arch, device = 'auto', **kwargs):
+    def __init__(self, disc_obs_shape, prior, net_arch, device = 'auto', optimizer_class = th.optim.Adam, lr = 0.0001, **kwargs):
         
         super(Discriminator, self).__init__()
         self.device = device
@@ -62,7 +62,8 @@ class Discriminator(nn.Module):
         out_size = prior.param_shape[0] if prior.param_shape else 1
         self.network = NeuralNetwork(in_size, out_size, net_arch, **kwargs).to(self.device)
         self.out_size = out_size
-        self.optimizer = th.optim.Adam(self.parameters())
+        self.optimizer = optimizer_class(self.parameters(), lr=lr)
+
 
     def forward(self, s):
         if not isinstance(s, th.Tensor):
