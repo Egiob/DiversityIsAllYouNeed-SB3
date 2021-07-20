@@ -56,8 +56,9 @@ class CNN(nn.Sequential):
 class Discriminator(nn.Module):
 
     """Estimate log p(z | s)."""
-    def __init__(self, disc_obs_shape, prior, net_arch, arch_type='Mlp',device = 'auto', **kwargs):
-        
+
+    def __init__(self, disc_obs_shape, prior, net_arch, device = 'auto',arch_type='Mlp', optimizer_class = th.optim.Adam, lr = 0.0001, **kwargs):
+
         super(Discriminator, self).__init__()
         self.device = device
         in_size = disc_obs_shape
@@ -70,7 +71,8 @@ class Discriminator(nn.Module):
             self.network = CNN(in_size, out_size, net_arch, **kwargs).to(self.device)
 
         self.out_size = out_size
-        self.optimizer = th.optim.Adam(self.parameters())
+        self.optimizer = optimizer_class(self.parameters(), lr=lr)
+
 
     def forward(self, s):
         if not isinstance(s, th.Tensor):
