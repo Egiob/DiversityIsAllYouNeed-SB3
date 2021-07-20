@@ -386,7 +386,6 @@ class ReplayBufferZ(BaseBuffer):
         self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.prior = prior
         z_size = self.prior.event_shape
-        # self.zs = th.zeros((self.buffer_size, z_size[0]), dtype=th.long)
         self.zs = np.zeros((self.buffer_size, z_size[0]), dtype=np.float32)
         if psutil is not None:
             total_memory_usage = (
@@ -394,14 +393,17 @@ class ReplayBufferZ(BaseBuffer):
                 + self.actions.nbytes
                 + self.rewards.nbytes
                 + self.dones.nbytes
+                + self.zs.nbytes
             )
             if self.next_observations is not None:
                 total_memory_usage += self.next_observations.nbytes
 
             if total_memory_usage > mem_available:
                 # Convert to GB
+
                 total_memory_usage /= 1e9
                 mem_available /= 1e9
+                print(total_memory_usage, mem_available)
                 warnings.warn(
                     "This system does not have apparently enough memory to store the complete "
                     f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
