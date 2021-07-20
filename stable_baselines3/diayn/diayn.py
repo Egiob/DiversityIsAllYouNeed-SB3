@@ -297,6 +297,7 @@ class DIAYN(SAC):
                 batch_size, env=self._vec_normalize_env
             )
 
+            
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
                 self.actor.reset_noise()
@@ -391,7 +392,10 @@ class DIAYN(SAC):
 
             log_q_phi = self.discriminator(disc_obs.to(self.device)).to(self.device)
             z = replay_data.zs.to(self.device)
+            print(th.exp(log_q_phi)[0])
+            print(z.argmax(dim=1)[0])
             discriminator_loss = th.nn.NLLLoss()(log_q_phi, z.argmax(dim=1))
+            print(discriminator_loss)
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
             discriminator_loss.backward()

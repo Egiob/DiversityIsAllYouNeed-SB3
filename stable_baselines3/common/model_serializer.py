@@ -4,11 +4,12 @@ from mlagents.torch_utils import torch
 from mlagents.trainers.torch.model_serialization import TensorNames
 from mlagents_envs.logging_util import get_logger
 from mlagents.trainers.settings import SerializationSettings
-from stable_baselines3.common.distributions import SquashedDiagGaussianDistributionONNXable
+from stable_baselines3.common.distributions import (
+    SquashedDiagGaussianDistributionONNXable,
+)
 
 
 logger = get_logger(__name__)
-
 
 
 class exporting_to_onnx:
@@ -41,11 +42,12 @@ class exporting_to_onnx:
         if not hasattr(exporting_to_onnx._local_data, "_is_exporting"):
             return False
         return exporting_to_onnx._local_data._is_exporting
-    
+
+
 class SACOnnxablePolicy(torch.nn.Module):
-    def __init__(self,  actor):
+    def __init__(self, actor):
         super(SACOnnxablePolicy, self).__init__()
-        
+
         # Removing the flatten layer because it can't be onnxed
         self.latent_pi = actor.latent_pi
         self.mu = actor.mu
@@ -55,29 +57,34 @@ class SACOnnxablePolicy(torch.nn.Module):
 
     def forward(self, input_):
 
-        #skill_0 = torch.zeros((input_.shape[0],1),dtype=input_.dtype)
-        #skill_1 = torch.ones((input_.shape[0],1),dtype=input_.dtype)
-        
-        #input_ = torch.cat([input_,skill_0,skill_1],axis=1)
+        # skill_0 = torch.zeros((input_.shape[0],1),dtype=input_.dtype)
+        # skill_1 = torch.ones((input_.shape[0],1),dtype=input_.dtype)
+
+        # input_ = torch.cat([input_,skill_0,skill_1],axis=1)
         export_out = []
-        version = torch.nn.Parameter(torch.Tensor([2.]), requires_grad=False)
+        version = torch.nn.Parameter(torch.Tensor([2.0]), requires_grad=False)
         memory = torch.nn.Parameter(torch.Tensor([0]), requires_grad=False)
-        is_continuous_control = torch.nn.Parameter(torch.Tensor([1]), requires_grad=False)
+        is_continuous_control = torch.nn.Parameter(
+            torch.Tensor([1]), requires_grad=False
+        )
         export_out += [version, memory]
         pi = self.latent_pi(input_)
         mu = self.mu(pi)
         log_std = self.std(pi)
         action = self.dist.actions_from_params(mu, log_std, deterministic=True)
         action_sum = action.shape[-1].item()
-        action_size =  torch.nn.Parameter(torch.Tensor([action_sum]),requires_grad=False)
+        action_size = torch.nn.Parameter(
+            torch.Tensor([action_sum]), requires_grad=False
+        )
         export_out += [action, action_size]
         export_out += [action]
-        export_out += [is_continuous_control]     
+        export_out += [is_continuous_control]
         export_out += [action_size]
-        #print(export_out)
+        # print(export_out)
         return tuple(export_out)
-        #return action
-    
+        # return action
+
+
 class ModelSerializer:
     def __init__(self, policy):
         # ONNX only support input in NCHW (channel first) format.
@@ -86,13 +93,15 @@ class ModelSerializer:
         # cause problem to barracuda import.
         self.policy = policy
         self.actor = SACOnnxablePolicy(self.policy.actor)
-        #observation_specs = self.policy.behavior_spec.observation_specs
-        obs_size = self.policy.observation_space.shape[0]+self.policy.prior.event_shape[0]
+        # observation_specs = self.policy.behavior_spec.observation_specs
+        obs_size = (
+            self.policy.observation_space.shape[0] + self.policy.prior.event_shape[0]
+        )
         observation_specs = [np.zeros((obs_size,))]
         batch_dim = [1]
         seq_len_dim = [1]
         vec_obs_size = 0
-        
+
         for obs_spec in observation_specs:
             if len(obs_spec.shape) == 1:
                 vec_obs_size += obs_spec.shape[0]
@@ -129,11 +138,10 @@ class ModelSerializer:
             if len(obs_spec.shape) == 2:
                 self.input_names.append(TensorNames.get_observation_name(i))
 
-
         self.dynamic_axes = {name: {0: "batch"} for name in self.input_names}
 
         self.output_names = [TensorNames.version_number, TensorNames.memory_size]
-    
+
         action_spec_cont = policy.action_space
         action_spec_disc = np.zeros(0)
         if action_spec_cont.shape[0] > 0:
@@ -150,10 +158,7 @@ class ModelSerializer:
                 TensorNames.discrete_action_output_shape,
             ]
             self.dynamic_axes.update({TensorNames.discrete_action_output: {0: "batch"}})
-        if (
-            action_spec_cont.shape[0] == 0
-            or action_spec_disc.shape[0] == 0
-        ):
+        if action_spec_cont.shape[0] == 0 or action_spec_disc.shape[0] == 0:
             self.output_names += [
                 TensorNames.action_output_deprecated,
                 TensorNames.is_continuous_control_deprecated,
@@ -162,7 +167,6 @@ class ModelSerializer:
             self.dynamic_axes.update(
                 {TensorNames.action_output_deprecated: {0: "batch"}}
             )
-            
 
     def export_policy_model(self, output_filepath: str) -> None:
         """
@@ -183,9 +187,8 @@ class ModelSerializer:
                 opset_version=9,
                 input_names=self.input_names,
                 output_names=self.output_names,
-                #output_names=['continuous_actions'],
+                # output_names=['continuous_actions'],
                 dynamic_axes=self.dynamic_axes,
-                verbose=1
-
+                verbose=1,
             )
         logger.info(f"Exported {onnx_output_path}")

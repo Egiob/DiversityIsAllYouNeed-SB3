@@ -2,14 +2,16 @@ import torch.nn as nn
 import torch as th
 
 import torch.nn.functional as F
+from torch.nn.modules.linear import Linear
+from torch.nn.modules.pooling import MaxPool2d
 
-class NeuralNetwork(nn.Sequential):
+class MLP(nn.Sequential):
 
     """Fully-connected neural network."""
 
     def __init__(self, in_size, out_size, hidden_sizes, 
-                 activation=nn.ReLU):
-        super(NeuralNetwork, self).__init__()
+                 activation=nn.ReLU, **kwargs):
+        super(MLP, self).__init__()
         self.layers = []
         
         for size in hidden_sizes:
@@ -26,41 +28,47 @@ class NeuralNetwork(nn.Sequential):
             inputs = layer(inputs)
         return inputs
   
-    
+
+class CNN(nn.Sequential):
+    """CNN."""
+    def __init__(self, in_size, out_size, net_arch,**kwargs):
+        super(CNN,self).__init__()
+
+        self.model = nn.Sequential(
+            nn.Conv2d(3,8,kernel_size=(2,2)),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(8,8,kernel_size=(2,2)),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.LazyLinear(32),
+            nn.ReLU(),
+            nn.Linear(32, out_size)
+        )
+
+    def forward(self, input):
+        return self.model(input)
 
 
-    @property
-    def hidden_sizes(self):
-        sizes = [
-            c.in_features for c in self.children() if isinstance(c, nn.Linear)
-        ]
-        return sizes[1:]
-
-    @property
-    def in_size(self):
-        sizes = [
-            c.in_features for c in self.children() if isinstance(c, nn.Linear)
-        ]
-        return sizes[0]
-
-    @property
-    def out_size(self):
-        sizes = [
-            c.out_features for c in self.children() if isinstance(c, nn.Linear)
-        ]
-        return sizes[-1]
 
 
 class Discriminator(nn.Module):
 
     """Estimate log p(z | s)."""
-    def __init__(self, disc_obs_shape, prior, net_arch, device = 'auto', **kwargs):
+    def __init__(self, disc_obs_shape, prior, net_arch, arch_type='Mlp',device = 'auto', **kwargs):
         
         super(Discriminator, self).__init__()
         self.device = device
         in_size = disc_obs_shape
         out_size = prior.param_shape[0] if prior.param_shape else 1
-        self.network = NeuralNetwork(in_size, out_size, net_arch, **kwargs).to(self.device)
+        if arch_type=='Mlp':
+
+            self.network = MLP(in_size, out_size, net_arch, **kwargs).to(self.device)
+
+        elif arch_type=='Cnn':
+            self.network = CNN(in_size, out_size, net_arch, **kwargs).to(self.device)
+
         self.out_size = out_size
         self.optimizer = th.optim.Adam(self.parameters())
 
