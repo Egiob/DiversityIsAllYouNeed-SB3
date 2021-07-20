@@ -398,6 +398,9 @@ class ReplayBufferZ(BaseBuffer):
             if self.next_observations is not None:
                 total_memory_usage += self.next_observations.nbytes
 
+            total_memory_usage /= 1e9
+            mem_available /= 1e9
+            print(total_memory_usage, mem_available)
             if total_memory_usage > mem_available:
                 # Convert to GB
 
