@@ -401,8 +401,8 @@ class BaseAlgorithm(ABC):
         self.start_time = time.time()
         if self.ep_info_buffer is None or reset_num_timesteps:
             # Initialize buffers if they don't exist, or reinitialize if resetting counters
-            self.ep_info_buffer = deque(maxlen=100)
-            self.ep_success_buffer = deque(maxlen=100)
+            self.ep_info_buffer = deque(maxlen=1000)
+            self.ep_success_buffer = deque(maxlen=1000)
 
         if self.action_noise is not None:
             self.action_noise.reset()

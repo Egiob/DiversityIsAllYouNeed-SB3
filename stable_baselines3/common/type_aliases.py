@@ -54,6 +54,25 @@ class ReplayBufferSamplesZ(NamedTuple):
     rewards: th.Tensor
     zs : th.Tensor
 
+class ReplayBufferSamplesZExternalDisc(NamedTuple):
+    observations: th.Tensor
+    actions: th.Tensor
+    next_observations: th.Tensor
+    dones: th.Tensor
+    rewards: th.Tensor
+    zs : th.Tensor
+    disc_obs: th.Tensor
+
+class ReplayBufferSamplesZExternalDiscTraj(NamedTuple):
+    observations: th.Tensor
+    actions: th.Tensor
+    next_observations: th.Tensor
+    dones: th.Tensor
+    rewards: th.Tensor
+    zs : th.Tensor
+    disc_obs: th.Tensor
+    lenghts : th.Tensor
+
 
 class DictReplayBufferSamples(ReplayBufferSamples):
     observations: TensorDict

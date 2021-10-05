@@ -528,3 +528,5 @@ class StopTrainingOnMaxEpisodes(BaseCallback):
                 f"{mean_ep_str}"
             )
         return continue_training
+
+
