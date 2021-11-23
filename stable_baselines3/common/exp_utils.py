@@ -8,6 +8,9 @@ import os
 from stable_baselines3.common.model_serializer import ModelSerializer
 from types import FunctionType as function
 from typing import Callable
+import matplotlib.pyplot as plt
+
+from matplotlib.colors import TABLEAU_COLORS, CSS4_COLORS
 
 
 class DiscriminatorFunction:
@@ -19,6 +22,96 @@ class DiscriminatorFunction:
 
     def __call__(self, obs):
         return self.f(obs)
+
+def print_traj_nav_2d_static(model, n_skills, n_trajs=1,n_seeds=1, show_target=False, static=True,
+                      max_steps=100,manual_seeds=None, figsize=None, title="", xlabel="",ylabel=""):
+    if n_skills <=10:
+        colors = list(TABLEAU_COLORS.keys())
+    else:
+        colors = list(CSS4_COLORS.keys())
+        
+    if figsize is None:
+        plt.figure(figsize=(12,10))
+    if manual_seeds is None:
+        seeds = np.random.randint(1000,size=n_seeds)
+    else:
+        seeds = manual_seeds
+    for seed in seeds:
+        trajs = []
+        for k in range(n_trajs):
+            if n_skills==1:
+                traj = generate_trajectory(model,0, max_steps, return_actions=False,seed=int(seed))
+                plt.plot(*traj[:,:2].T,color=colors[k])
+                
+            else:
+                
+                for i in range(n_skills):
+                    traj = generate_trajectory(model,i, max_steps, return_actions=False,seed=int(seed))
+                    plt.plot(*traj[:,:2].T,color=colors[i])
+
+        if show_target:
+            if static:
+                plt.plot(*traj[0,2:4].T, "ko")
+
+    for i in range(n_skills):
+        plt.plot(*[np.nan]*2, label=f'skill {i}',color=colors[i])
+    if show_target:    
+        plt.plot(*[np.nan]*2,"ko",label="target")
+    plt.xlim(-0.2,0.6)
+    plt.ylim(-0.2,0.6)
+    #plt.legend()
+    plt.rcParams.update({'font.size': 22})
+    plt.title(title,fontsize=50,weight=500)
+    plt.xlabel(xlabel,fontsize=40,fontweight=2)
+    plt.ylabel(ylabel,fontsize=40,fontweight=2)
+    plt.show()
+    
+def print_traj_nav_2d(model, n_skills, n_trajs=1,n_seeds=1, show_target=False, static=False,
+                      max_steps=100,manual_seeds=None, figsize=None, title="", xlabel="",ylabel=""):
+    if n_skills <=10:
+        colors = list(TABLEAU_COLORS.keys())
+    else:
+        colors = list(CSS4_COLORS.keys())
+        
+    if figsize is None:
+        plt.figure(figsize=(12,10))
+    if manual_seeds is None:
+        seeds = np.random.randint(1000,size=n_seeds)
+    else:
+        seeds = manual_seeds
+    for seed in seeds:
+        trajs = []
+        
+        
+        for k in range(n_trajs):
+            if n_skills==1:
+                traj = generate_trajectory(model,i, max_steps, return_actions=False,seed=int(seed))
+                plt.plot(*traj[:,:2].T,color=colors[k])
+                
+            else:
+                
+                for i in range(n_skills):
+                    traj = generate_trajectory(model,i, max_steps, return_actions=False,seed=int(seed))
+                    plt.plot(*traj[:,:2].T,color=colors[i])
+
+        if show_target:
+            if static:
+                plt.plot(*traj[0,2:4].T, "ko")
+            else:
+                plt.plot(*traj[0,2:4].T+traj[0,:2].T,"ko")
+
+    for i in range(n_skills):
+        plt.plot(*[np.nan]*2, label=f'skill {i}',color=colors[i])
+    if show_target:    
+        plt.plot(*[np.nan]*2,"ko",label="target")
+    plt.xlim(-1,1)
+    plt.ylim(-1,1)
+    #plt.legend()
+    plt.rcParams.update({'font.size': 22})
+    plt.title(title,fontsize=50,weight=500)
+    plt.xlabel(xlabel,fontsize=40,fontweight=2)
+    plt.ylabel(ylabel,fontsize=40,fontweight=2)
+    plt.show()
 
 
 

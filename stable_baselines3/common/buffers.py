@@ -390,6 +390,8 @@ class ReplayBufferZ(BaseBuffer):
         self.prior = prior
         z_size = self.prior.event_shape
         self.zs = np.zeros((self.buffer_size, z_size[0]), dtype=np.float32)
+
+        self.ep_index = np.zeros((self.buffer_size, self.n_envs),dtype=np.int64)
         if psutil is not None:
             total_memory_usage = (
                 self.observations.nbytes
@@ -397,6 +399,7 @@ class ReplayBufferZ(BaseBuffer):
                 + self.rewards.nbytes
                 + self.dones.nbytes
                 + self.zs.nbytes
+                + self.ep_index.nbytes
             )
             if self.next_observations is not None:
                 total_memory_usage += self.next_observations.nbytes
@@ -423,6 +426,7 @@ class ReplayBufferZ(BaseBuffer):
         reward: np.ndarray,
         done: np.ndarray,
         z: np.ndarray,
+        ep_index: np.ndarray
     ) -> None:
         # Copy to avoid modification by reference
         self.observations[self.pos] = np.array(obs).copy()
@@ -437,7 +441,7 @@ class ReplayBufferZ(BaseBuffer):
         self.rewards[self.pos] = np.array(reward).copy()
         self.dones[self.pos] = np.array(done).copy()
         self.zs[self.pos] = np.array(z).copy()
-
+        self.ep_index[self.pos] = np.array(ep_index).copy()
         self.pos += 1
         if self.pos == self.buffer_size:
             self.full = True
@@ -488,6 +492,7 @@ class ReplayBufferZ(BaseBuffer):
             self.dones[batch_inds],
             self._normalize_reward(self.rewards[batch_inds], env),
             self.zs[batch_inds],
+            self.ep_index[batch_inds]
         )
         return ReplayBufferSamplesZ(*tuple(map(self.to_torch, data)))
 
@@ -552,8 +557,10 @@ class ReplayBufferZExternalDisc(BaseBuffer):
         z_size = self.prior.event_shape
         self.zs = np.zeros((self.buffer_size, z_size[0]), dtype=np.float32)
         self.disc_shape = disc_shape
-        self.disc_obs = np.zeros((self.buffer_size, self.n_envs) + self.disc_shape,
+        self.disc_obs = np.zeros((self.buffer_size, self.n_envs) + tuple(self.disc_shape),
                                  dtype=np.float32)
+
+        self.ep_index = np.zeros((self.buffer_size, self.n_envs),dtype=np.int64)
         if psutil is not None:
             total_memory_usage = (
                 self.observations.nbytes
@@ -562,6 +569,7 @@ class ReplayBufferZExternalDisc(BaseBuffer):
                 + self.dones.nbytes
                 + self.zs.nbytes
                 + self.disc_obs.nbytes
+                + self.ep_index.nbytes
             )
             if self.next_observations is not None:
                 total_memory_usage += self.next_observations.nbytes
@@ -588,7 +596,8 @@ class ReplayBufferZExternalDisc(BaseBuffer):
         reward: np.ndarray,
         done: np.ndarray,
         z: np.ndarray,
-        disc_obs: np.ndarray
+        disc_obs: np.ndarray,
+        ep_index: np.ndarray
     ) -> None:
         # Copy to avoid modification by reference
         self.observations[self.pos] = np.array(obs).copy()
@@ -604,6 +613,7 @@ class ReplayBufferZExternalDisc(BaseBuffer):
         self.dones[self.pos] = np.array(done).copy()
         self.zs[self.pos] = np.array(z).copy()
         self.disc_obs[self.pos] = np.array(disc_obs).copy()
+        self.ep_index[self.pos] = np.array(ep_index).copy()
 
         self.pos += 1
         if self.pos == self.buffer_size:
@@ -657,7 +667,8 @@ class ReplayBufferZExternalDisc(BaseBuffer):
             self.dones[batch_inds],
             self._normalize_reward(self.rewards[batch_inds], env),
             self.zs[batch_inds],
-            self.disc_obs[batch_inds, 0, :]
+            self.disc_obs[batch_inds, 0, :],
+            self.ep_index[batch_inds]
         )
         return ReplayBufferSamplesZExternalDisc(*tuple(map(self.to_torch, data)))
 
@@ -804,7 +815,7 @@ class ReplayBufferZExternalDiscTraj(BaseBuffer):
         z_size = self.prior.event_shape
         self.zs = np.full((self.buffer_size, self.max_steps, z_size[0]), -1, dtype=np.float32)
         self.disc_shape = disc_shape
-        self.disc_obs = np.full((self.buffer_size, self.max_steps, self.n_envs) + self.disc_shape, -np.inf,
+        self.disc_obs = np.full((self.buffer_size, self.max_steps, self.n_envs) + tuple(self.disc_shape), -np.inf,
                                  dtype=np.float32)
         self.current_episode = 0
         self.lenghts = np.zeros((self.buffer_size), dtype=np.float32)

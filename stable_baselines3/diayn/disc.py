@@ -24,6 +24,7 @@ class MLP(nn.Sequential):
             in_size = size
         self.layers.append(nn.Linear(in_size, out_size))
         self.layers = nn.ModuleList(self.layers)
+        #print(self.layers)
 
         
 
