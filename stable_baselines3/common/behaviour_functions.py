@@ -51,6 +51,7 @@ def crawler_forelegs_contact(obs):
     return disc_obs
 
 
+"""
 def discretize_xy(obs, dims, min_values, max_values, n=2):
     if isinstance(obs, np.ndarray):
         obs = obs.copy()[:, :n]
@@ -68,6 +69,22 @@ def discretize_xy(obs, dims, min_values, max_values, n=2):
                     torch.bucketize(obs[:, i], bins, right=True), max=dims[i] - 1
                 )
             ]
+    return obs[:, :n]
+"""
+
+
+def discretize_xy(obs, dims, min_values, max_values, n=2):
+    if isinstance(obs, np.ndarray):
+
+        for i in range(n):
+            pos = np.linspace(min_values[i], max_values[i], dims[i])
+            obs[:, i] = pos[np.abs((pos[None] - obs[:, i, None])).argmin(axis=1)]
+
+    elif isinstance(obs, torch.Tensor):
+        device = obs.device
+        for i in range(n):
+            pos = torch.linspace(min_values[i], max_values[i], dims[i]).to(device)
+            obs[:, i] = pos[torch.abs((pos[None] - obs[:, i, None])).argmin(axis=1)]
     return obs[:, :n]
 
 
