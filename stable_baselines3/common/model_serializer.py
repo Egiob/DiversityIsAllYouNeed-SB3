@@ -1,13 +1,14 @@
-import numpy as np
 import threading
+
+import numpy as np
 from mlagents.torch_utils import torch
+from mlagents.trainers.settings import SerializationSettings
 from mlagents.trainers.torch.model_serialization import TensorNames
 from mlagents_envs.logging_util import get_logger
-from mlagents.trainers.settings import SerializationSettings
+
 from stable_baselines3.common.distributions import (
     SquashedDiagGaussianDistributionONNXable,
 )
-
 
 logger = get_logger(__name__)
 
@@ -42,6 +43,11 @@ class exporting_to_onnx:
         if not hasattr(exporting_to_onnx._local_data, "_is_exporting"):
             return False
         return exporting_to_onnx._local_data._is_exporting
+
+
+def export_to_onnx(model, save_path):
+    modese = ModelSerializer(model.policy)
+    modese.export_policy_model(save_path)
 
 
 class SACOnnxablePolicy(torch.nn.Module):

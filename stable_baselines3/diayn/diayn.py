@@ -1,28 +1,38 @@
-from logging import log
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
-import time
-from types import FunctionType as function
-import gym
+import io
+import pathlib
 import sys
+import time
+from collections import deque
+from logging import log
+from types import FunctionType as function
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
+
+import gym
 import numpy as np
+import torch as th
 from numpy.core.fromnumeric import mean
 from numpy.lib.index_tricks import diag_indices
-import torch as th
-from collections import deque
+from scipy.special import expit as sigm
 from torch.distributions import beta
 from torch.nn import functional as F
-import pathlib
-import io
-from scipy.special import expit as sigm
+
+from stable_baselines3 import SAC
+from stable_baselines3.common.base_class import BaseAlgorithm
+from stable_baselines3.common.buffers import (
+    ReplayBufferZ,
+    ReplayBufferZExternalDisc,
+    ReplayBufferZExternalDiscTraj,
+)
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.exp_utils import DiscriminatorFunction
+from stable_baselines3.common.noise import ActionNoise
+from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.save_util import (
     load_from_zip_file,
     recursive_getattr,
     recursive_setattr,
     save_to_zip_file,
 )
-
-from stable_baselines3.common.noise import ActionNoise
-from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.type_aliases import (
     GymEnv,
     MaybeCallback,
@@ -32,21 +42,17 @@ from stable_baselines3.common.type_aliases import (
     TrainFrequencyUnit,
 )
 from stable_baselines3.common.utils import (
+    check_for_correct_spaces,
+    get_linear_fn,
+    polyak_update,
     safe_mean,
     should_collect_more_steps,
-    polyak_update,
-    check_for_correct_spaces,
 )
-from stable_baselines3.common.base_class import BaseAlgorithm
-from stable_baselines3.diayn import disc
-from stable_baselines3.diayn.policies import DIAYNPolicy
-from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import VecEnv
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.buffers import ReplayBufferZ, ReplayBufferZExternalDisc, ReplayBufferZExternalDiscTraj
-from stable_baselines3.common.exp_utils import DiscriminatorFunction
+from stable_baselines3.diayn import disc
 from stable_baselines3.diayn.disc import Discriminator
-from stable_baselines3.common.utils import get_linear_fn
+from stable_baselines3.diayn.policies import DIAYNPolicy
+
 
 class DIAYN(SAC):
     """
@@ -151,6 +157,9 @@ class DIAYN(SAC):
         episode_buffer_size: int = 100,
         mean_reward: bool = None,
         adaptive_beta: float = None,
+        qd_grid=None,
+        behaviour_descriptor=None,
+        metric_loggers=None,
     ):
 
         super(SAC, self).__init__(
@@ -188,13 +197,12 @@ class DIAYN(SAC):
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer = None
 
-
         # Initialization of the discriminator
         self.discriminator_kwargs = discriminator_kwargs
-        if self.discriminator_kwargs.get('net_arch') is None:
-            self.discriminator_kwargs['net_arch'] =  [256, 256]
-        if self.discriminator_kwargs.get('arch_type') is None:
-            self.discriminator_kwargs['arch_type'] = "Mlp"
+        if self.discriminator_kwargs.get("net_arch") is None:
+            self.discriminator_kwargs["net_arch"] = [256, 256]
+        if self.discriminator_kwargs.get("arch_type") is None:
+            self.discriminator_kwargs["arch_type"] = "Mlp"
         self.external_disc_shape = external_disc_shape
         assert (
             disc_on == "all"
@@ -202,7 +210,6 @@ class DIAYN(SAC):
             or isinstance(disc_on, DiscriminatorFunction)
         ), "Please pass a valid value for disc_on parameter"
 
-                
         self.log_p_z = prior.logits.detach().cpu().numpy()
         self.prior = prior
         self.combined_rewards = combined_rewards
@@ -212,12 +219,18 @@ class DIAYN(SAC):
         self.n_skills = self.prior.event_shape[0]
         self.beta_smooth = beta_smooth
         self.disc_on = disc_on
-        self.max_steps=max_steps
+        self.max_steps = max_steps
+        self.behaviour_descriptor = behaviour_descriptor
+        self.metric_loggers = metric_loggers
         if self.external_disc_shape:
-            self.obs_space_shape = self.external_disc_shape
+            self.disc_obs_space_shape = self.external_disc_shape
+        elif self.behaviour_descriptor:
+            self.disc_obs_space_shape = tuple([len(env.descriptors_names)])
         else:
-            self.obs_space_shape = env.observation_space.shape[0]
+            self.disc_obs_space_shape = env.observation_space.shape[0]
 
+        if self.behaviour_descriptor:
+            self.observation_space = env.observation_space["observation"]
         self.beta_momentum = beta_momentum
         self.beta_temp = beta_temp
         self.adaptive_beta = adaptive_beta
@@ -239,29 +252,29 @@ class DIAYN(SAC):
             self.beta_buffer = deque(maxlen=self.episode_buffer_size)
             self.beta_buffer.append(np.zeros(self.n_skills))
 
-
-        if self.disc_on == "all" or self.disc_on == ... :
+        if self.disc_on == "all" or self.disc_on == ...:
             self.disc_on = ...
-            self.disc_obs_shape = self.obs_space_shape
+            self.disc_obs_shape = self.disc_obs_space_shape
         elif isinstance(self.disc_on, list):
-            self.disc_obs_shape = self.obs_space_shape
-            assert min(self.disc_on) >= 0 and max(self.disc_on) < self.disc_obs_shape
+            self.disc_obs_shape = self.disc_obs_space_shape
+            # assert min(self.disc_on) >= 0 and max(self.disc_on) < self.disc_obs_shape[0]
             self.disc_obs_shape = len(self.disc_on)
 
         elif isinstance(self.disc_on, DiscriminatorFunction):
             self.disc_obs_shape = self.disc_on.output_size
-        
-        else: 
+
+        else:
             self.disc_obs_shape = None
         out_size = self.prior.param_shape[0] if self.prior.param_shape else 1
         self.discriminator = Discriminator(
-            self.disc_obs_shape, out_size, device=self.device, **self.discriminator_kwargs
+            self.disc_obs_shape,
+            out_size,
+            device=self.device,
+            **self.discriminator_kwargs,
         )
-        
 
-
-        if self.v1 and self.discriminator_kwargs['arch_type']=="Rnn":
-            print("here",self.device)
+        if self.v1 and self.discriminator_kwargs["arch_type"] == "Rnn":
+            print("here", self.device)
             self.replay_buffer = ReplayBufferZExternalDiscTraj(
                 self.buffer_size,
                 self.max_steps,
@@ -288,7 +301,6 @@ class DIAYN(SAC):
                     optimize_memory_usage=self.optimize_memory_usage,
                 )
 
-            
             else:
                 self.replay_buffer = ReplayBufferZ(
                     self.buffer_size,
@@ -297,17 +309,9 @@ class DIAYN(SAC):
                     self.prior,
                     self.device,
                     optimize_memory_usage=self.optimize_memory_usage,
-            
                 )
 
-                
-                    
-
-                    
-            
-            
-
-        #print(self.policy_class)
+        # print(self.policy_class)
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             self.observation_space,
             self.action_space,
@@ -364,10 +368,12 @@ class DIAYN(SAC):
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
 
-        ent_coef_losses, ent_coefs = deque(maxlen=100),deque(maxlen=100)
-        (actor_losses, critic_losses, disc_losses) = (deque(maxlen=100),
-                                                      deque(maxlen=100),
-                                                      deque(maxlen=100))
+        ent_coef_losses, ent_coefs = deque(maxlen=100), deque(maxlen=100)
+        (actor_losses, critic_losses, disc_losses) = (
+            deque(maxlen=100),
+            deque(maxlen=100),
+            deque(maxlen=100),
+        )
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
@@ -395,7 +401,6 @@ class DIAYN(SAC):
                             for ep_info in self.ep_info_buffer
                         ]
 
-
                         mean_diayn_reward = safe_mean(
                             mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
                         )
@@ -404,63 +409,76 @@ class DIAYN(SAC):
                             mean_diayn_reward = 0.0
 
                         if self.adaptive_beta:
-                            beta = self.adaptive_beta/(np.abs(mean_diayn_reward)+1)
+                            beta = self.adaptive_beta / (np.abs(mean_diayn_reward) + 1)
                         else:
                             beta = self.beta
 
                         if self.smerl:
                             if self.beta_smooth:
-                                a = self.smerl-np.abs(self.eps * self.smerl)
-                                beta_on = beta * sigm((mean_true_reward-a)/a*4)
+                                a = self.smerl - np.abs(self.eps * self.smerl)
+                                beta_on = beta * sigm((mean_true_reward - a) / a * 4)
                             else:
                                 beta_on = float(
-                                (mean_true_reward
-                                    >= self.smerl - np.abs(self.eps * self.smerl)
-                                ) * beta)
+                                    (
+                                        mean_true_reward
+                                        >= self.smerl - np.abs(self.eps * self.smerl)
+                                    )
+                                    * beta
+                                )
 
                         else:
                             beta_on = beta
                         betas[z_idx] = beta_on
 
-                if self.discriminator_kwargs['arch_type'] == "Rnn":
-                    (obs_trajs, action_trajs,
-                    next_obs_trajs, done_trajs,
-                    reward_trajs, z_trajs, 
-                    disc_trajs, lenghts) = self.replay_buffer.sample(batch_size)
+                if self.discriminator_kwargs["arch_type"] == "Rnn":
+                    (
+                        obs_trajs,
+                        action_trajs,
+                        next_obs_trajs,
+                        done_trajs,
+                        reward_trajs,
+                        z_trajs,
+                        disc_trajs,
+                        lenghts,
+                    ) = self.replay_buffer.sample(batch_size)
                     log_q_phi = self.discriminator(disc_trajs, lenghts).to(self.device)
 
                     diayn_reward = log_q_phi - self.log_p_z[0]
 
-                    mask = reward_trajs>-np.inf
+                    mask = reward_trajs > -np.inf
 
                     mask = z_trajs > -1
                     diayn_reward = diayn_reward[mask]
-                    diayn_reward = diayn_reward.view(-1,z_trajs.shape[-1])
-                    obs = obs_trajs[obs_trajs>-np.inf].view((-1,obs_trajs.shape[-1]))
-                    next_obs = next_obs_trajs[next_obs_trajs>-np.inf].view((-1,next_obs_trajs.shape[-1]))
-                    zs = z_trajs[z_trajs>-1].view((-1,z_trajs.shape[-1]))
-                    dones = done_trajs[done_trajs>-1].view((-1,1))
-                    actions = action_trajs[action_trajs>-np.inf].view((-1,action_trajs.shape[-1]))
-                    disc_obs = disc_trajs[disc_trajs>-np.inf].view((-1,disc_trajs.shape[-1]))
-
+                    diayn_reward = diayn_reward.view(-1, z_trajs.shape[-1])
+                    obs = obs_trajs[obs_trajs > -np.inf].view((-1, obs_trajs.shape[-1]))
+                    next_obs = next_obs_trajs[next_obs_trajs > -np.inf].view(
+                        (-1, next_obs_trajs.shape[-1])
+                    )
+                    zs = z_trajs[z_trajs > -1].view((-1, z_trajs.shape[-1]))
+                    dones = done_trajs[done_trajs > -1].view((-1, 1))
+                    actions = action_trajs[action_trajs > -np.inf].view(
+                        (-1, action_trajs.shape[-1])
+                    )
+                    disc_obs = disc_trajs[disc_trajs > -np.inf].view(
+                        (-1, disc_trajs.shape[-1])
+                    )
 
                     if self.combined_rewards:
-                        true_reward = reward_trajs[reward_trajs>-np.inf].view((-1,1))
+                        true_reward = reward_trajs[reward_trajs > -np.inf].view((-1, 1))
                         betas = th.Tensor(betas) * zs
                         diayn_reward = diayn_reward * betas
                     else:
-                        true_reward=0
-                            
+                        true_reward = 0
 
+                    rewards = true_reward + diayn_reward.sum(dim=1, keepdim=True)
 
-
-                    rewards = true_reward + diayn_reward.sum(dim=1,keepdim=True)
-
-                    discriminator_loss = self.discriminator.loss(log_q_phi, z_trajs).to(self.device)
+                    discriminator_loss = self.discriminator.loss(log_q_phi, z_trajs).to(
+                        self.device
+                    )
 
                 else:
                     replay_data = self.replay_buffer.sample(
-                    batch_size, env=self._vec_normalize_env
+                        batch_size, env=self._vec_normalize_env
                     )
                     obs = replay_data.observations
                     zs = replay_data.zs
@@ -468,11 +486,10 @@ class DIAYN(SAC):
                     true_reward = replay_data.rewards
                     dones = replay_data.dones
                     actions = replay_data.actions
-                    
+
                     ep_index = replay_data.ep_index.flatten()
                     len_episodes = th.Tensor(self.len_episodes)[ep_index]
                     # Get or compute vector to pass to the discriminator
-
 
                     if isinstance(self.disc_on, DiscriminatorFunction):
                         if self.external_disc_shape:
@@ -485,27 +502,29 @@ class DIAYN(SAC):
                         else:
                             disc_obs = replay_data.observations[:, self.disc_on]
 
-
                     log_q_phi = self.discriminator(disc_obs)
                     discriminator_loss = self.discriminator.loss(log_q_phi, zs)
 
                     diayn_reward = log_q_phi.clone().detach() - self.log_p_z[0]
 
-
-                    
-
                     if self.combined_rewards:
-                        betas = th.Tensor(betas) * zs          
+                        betas = th.Tensor(betas) * zs
                         diayn_reward = diayn_reward * betas
                         if self.mean_reward:
-                            rewards = true_reward + diayn_reward.sum(dim=1,keepdim=True)/len_episodes[:,None]
+                            rewards = (
+                                true_reward
+                                + diayn_reward.sum(dim=1, keepdim=True)
+                                / len_episodes[:, None]
+                            )
                         else:
-                            rewards = true_reward + diayn_reward.sum(dim=1,keepdim=True)
+                            rewards = true_reward + diayn_reward.sum(
+                                dim=1, keepdim=True
+                            )
 
                     else:
                         diayn_reward = diayn_reward * zs
-                        rewards = diayn_reward.sum(dim=1,keepdim=True)
-                    
+                        rewards = diayn_reward.sum(dim=1, keepdim=True)
+
             else:
 
                 replay_data = self.replay_buffer.sample(
@@ -518,16 +537,15 @@ class DIAYN(SAC):
                 dones = replay_data.dones
                 actions = replay_data.actions
 
-
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
                 self.actor.reset_noise()
 
             # Action by the current actor for the sampled state
             # We concatenate state with current one hot encoded skill
-            
+
             obs = th.cat([obs, zs], dim=1)
-            
+
             actions_pi, log_prob = self.actor.action_log_prob(obs)
             log_prob = log_prob.view(-1, 1)
 
@@ -564,12 +582,8 @@ class DIAYN(SAC):
                 # add entropy term
                 next_q_values = next_q_values - ent_coef * next_log_prob.view(-1, 1)
                 # td error + entropy term
-                #print(rewards.shape, th.Tensor(dones).shape, next_q_values.shape)
-                target_q_values = (
-                        rewards
-                        + (1 - dones) * self.gamma * next_q_values
-                    )
-
+                # print(rewards.shape, th.Tensor(dones).shape, next_q_values.shape)
+                target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
@@ -608,18 +622,22 @@ class DIAYN(SAC):
                     self.critic.parameters(), self.critic_target.parameters(), self.tau
                 )
 
-
             if not self.v1:
-                if self.discriminator_kwargs['arch_type'] == 'Rnn':
-                    trajs, z_trajs, lenghts = self.replay_buffer.sample_trajectories(batch_size, disc_only=True)
-                    log_q_phi = self.discriminator(trajs, th.Tensor(lenghts)).to(self.device)
-                    discriminator_loss = self.discriminator.loss(log_q_phi, th.Tensor(z_trajs).to(self.device))
-
+                if self.discriminator_kwargs["arch_type"] == "Rnn":
+                    trajs, z_trajs, lenghts = self.replay_buffer.sample_trajectories(
+                        batch_size, disc_only=True
+                    )
+                    log_q_phi = self.discriminator(trajs, th.Tensor(lenghts)).to(
+                        self.device
+                    )
+                    discriminator_loss = self.discriminator.loss(
+                        log_q_phi, th.Tensor(z_trajs).to(self.device)
+                    )
 
                 else:
                     if self.external_disc_shape:
                         disc_obs = replay_data.disc_obs
-            
+
                     else:
                         # Get or compute vector to pass to the discriminator
                         if isinstance(self.disc_on, DiscriminatorFunction):
@@ -627,11 +645,11 @@ class DIAYN(SAC):
                         else:
                             disc_obs = replay_data.observations[:, self.disc_on]
 
-
-                    log_q_phi = self.discriminator(disc_obs.to(self.device)).to(self.device)
+                    log_q_phi = self.discriminator(disc_obs.to(self.device)).to(
+                        self.device
+                    )
                     z = zs.to(self.device)
                     discriminator_loss = self.discriminator.loss(log_q_phi, z)
-        
 
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
@@ -703,13 +721,11 @@ class DIAYN(SAC):
                     if self.gradient_steps > 0
                     else rollout.episode_timesteps
                 )
-                
+
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
 
         callback.on_training_end()
         return self
-
-
 
     def collect_rollouts(
         self,
@@ -717,7 +733,7 @@ class DIAYN(SAC):
         z: th.Tensor,
         callback: BaseCallback,
         train_freq: TrainFreq,
-        replay_buffer: Union[ReplayBufferZ,ReplayBufferZExternalDisc],
+        replay_buffer: Union[ReplayBufferZ, ReplayBufferZExternalDisc],
         action_noise: Optional[ActionNoise] = None,
         learning_starts: int = 0,
         log_interval: Optional[int] = None,
@@ -779,11 +795,14 @@ class DIAYN(SAC):
                 )
 
                 # Rescale and perform action
-                new_obs, true_reward, done, infos = env.step(action)
+                if self.behaviour_descriptor:
+                    new_obs, true_reward, done, infos = env.step(action)
+                    new_obs = new_obs["observation"]
+                else:
+                    new_obs, true_reward, done, infos = env.step(action)
                 done = done[0]
 
-
-                #get the observation of the discriminator
+                # get the observation of the discriminator
                 if self.external_disc_shape:
                     disc_obs = callback.on_step()
                 else:
@@ -792,29 +811,29 @@ class DIAYN(SAC):
                     else:
                         disc_obs = new_obs[:, self.disc_on]
 
-
-                #compute the forward pass of the discriminator
+                # compute the forward pass of the discriminator
                 z_idx = np.argmax(z.cpu())
 
-                if self.discriminator_kwargs['arch_type']=='Rnn':
-                    disc_traj,lenght = replay_buffer.get_current_traj() 
-                    lenght = int(lenght)+1
-                    disc_traj[lenght-1] = th.Tensor(disc_obs)
-                    out = self.discriminator(disc_traj[None,:,:], th.Tensor([lenght]))
-                    log_q_phi = out[:, lenght-1, z.argmax()].detach().cpu().numpy()
+                if self.discriminator_kwargs["arch_type"] == "Rnn":
+                    disc_traj, lenght = replay_buffer.get_current_traj()
+                    lenght = int(lenght) + 1
+                    disc_traj[lenght - 1] = th.Tensor(disc_obs)
+                    out = self.discriminator(disc_traj[None, :, :], th.Tensor([lenght]))
+                    log_q_phi = out[:, lenght - 1, z.argmax()].detach().cpu().numpy()
 
                 else:
                     log_q_phi = (
-                        self.discriminator(disc_obs)[:, z.argmax()].detach().cpu().numpy()
+                        self.discriminator(disc_obs)[:, z.argmax()]
+                        .detach()
+                        .cpu()
+                        .numpy()
                     )
 
                 if isinstance(self.log_p_z, th.Tensor):
                     self.log_p_z = self.log_p_z.cpu().numpy()
 
-                #compute diversity reward
+                # compute diversity reward
                 diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
-
-
 
                 # beta update and logging
 
@@ -829,60 +848,52 @@ class DIAYN(SAC):
                             for ep_info in self.ep_info_buffer
                         ]
 
-
                         mean_true_reward = safe_mean(
                             mean_true_reward, where=~np.isnan(mean_true_reward)
                         )
-
 
                         mean_diayn_reward = [
                             ep_info.get(f"r_diayn_{z_idx}")
                             for ep_info in self.ep_info_buffer
                         ]
 
-
                         mean_diayn_reward = safe_mean(
                             mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
                         )
 
-
                         if np.isnan(mean_true_reward):
                             mean_true_reward = 0.0
-                        
+
                         if np.isnan(mean_diayn_reward):
                             mean_diayn_reward = 0.0
 
-
                         if self.adaptive_beta:
-                            beta = self.adaptive_beta/(1+np.abs(mean_diayn_reward))
+                            beta = self.adaptive_beta / (1 + np.abs(mean_diayn_reward))
                         else:
-                            beta= self.beta
+                            beta = self.beta
 
-
-                        if self.beta_smooth :
-                            a = self.smerl-np.abs(self.eps * self.smerl)
-                            beta_on = beta * sigm((mean_true_reward-a)/a*4)
+                        if self.beta_smooth:
+                            a = self.smerl - np.abs(self.eps * self.smerl)
+                            beta_on = beta * sigm((mean_true_reward - a) / a * 4)
                         else:
                             beta_on = float(
-                            (
-                                mean_true_reward
-                                >= self.smerl - np.abs(self.eps * self.smerl)
-                            ) * beta
-                        )
+                                (
+                                    mean_true_reward
+                                    >= self.smerl - np.abs(self.eps * self.smerl)
+                                )
+                                * beta
+                            )
 
                         betas = self.beta_buffer[-1].copy()
                         betas[z_idx] = beta_on
                         self.beta_buffer.append(betas)
                         # add beta*diayn_reward if mean_reward is closer than espilon*smerl to smerl
-                        reward =  diayn_reward * beta_on + true_reward
+                        reward = diayn_reward * beta_on + true_reward
                     else:
                         reward = beta * diayn_reward + true_reward
 
                 else:
                     reward = diayn_reward
-
-                    
-
 
                 self.num_timesteps += 1
                 episode_timesteps += 1
@@ -891,7 +902,7 @@ class DIAYN(SAC):
                 # Give access to local variables
                 callback.update_locals(locals())
                 # Only stop training if return value is False, not when it is None.
-                
+
                 if callback.on_step() is False:
                     return RolloutReturnZ(
                         0.0,
@@ -900,7 +911,7 @@ class DIAYN(SAC):
                         continue_training=False,
                         z=z,
                     )
-                
+
                 true_episode_reward += true_reward
                 diayn_episode_reward += diayn_reward
                 observed_episode_reward += reward
@@ -915,11 +926,10 @@ class DIAYN(SAC):
 
                             maybe_ep_info[f"r_diayn_{i}"] = np.nan
                             if self.combined_rewards:
-                                if self.beta == "auto" or self.smerl:               
+                                if self.beta == "auto" or self.smerl:
                                     maybe_ep_info[f"beta_{i}"] = betas[i]
 
-
-                        maybe_ep_info[f"r_true_{z_idx}"] = true_episode_reward[0]   
+                        maybe_ep_info[f"r_true_{z_idx}"] = true_episode_reward[0]
 
                         maybe_ep_info[f"r_diayn_{z_idx}"] = diayn_episode_reward[0]
                         maybe_ep_info["r"] = observed_episode_reward[0]
@@ -933,18 +943,30 @@ class DIAYN(SAC):
 
                 if not self.external_disc_shape:
                     disc_obs = None
-                
-                if disc_obs is None:
-                    self._store_transition(
-                        replay_buffer, buffer_action, new_obs, reward, done, infos, z_store
-                    )
 
+                if disc_obs is None:
+
+                    self._store_transition(
+                        replay_buffer,
+                        buffer_action,
+                        new_obs,
+                        reward,
+                        done,
+                        infos,
+                        z_store,
+                    )
 
                 else:
                     self._store_transition(
-                        replay_buffer, buffer_action, new_obs, reward, done, infos, z_store, disc_obs
+                        replay_buffer,
+                        buffer_action,
+                        new_obs,
+                        reward,
+                        done,
+                        infos,
+                        z_store,
+                        disc_obs,
                     )
-
 
                 self._update_current_progress_remaining(
                     self.num_timesteps, self._total_timesteps
@@ -989,14 +1011,14 @@ class DIAYN(SAC):
 
     def _store_transition(
         self,
-        replay_buffer: Union[ReplayBufferZ,ReplayBufferZExternalDisc],
+        replay_buffer: Union[ReplayBufferZ, ReplayBufferZExternalDisc],
         buffer_action: np.ndarray,
         new_obs: np.ndarray,
         reward: np.ndarray,
         done: np.ndarray,
         infos: List[Dict[str, Any]],
         z: np.ndarray,
-        disc_obs: Optional[np.ndarray]=None
+        disc_obs: Optional[np.ndarray] = None,
     ) -> None:
         """
         Store transition in the replay buffer.
@@ -1014,6 +1036,8 @@ class DIAYN(SAC):
         :param z: The active skill
         """
         # Store only the unnormalized version
+        if isinstance(self._last_obs, dict):
+            self._last_obs = self._last_obs["observation"]
         if self._vec_normalize_env is not None:
             new_obs_ = self._vec_normalize_env.get_original_obs()
             reward_ = self._vec_normalize_env.get_original_reward()
@@ -1024,7 +1048,10 @@ class DIAYN(SAC):
         # As the VecEnv resets automatically, new_obs is already the
         # first observation of the next episode
         if done and infos[0].get("terminal_observation") is not None:
-            next_obs = infos[0]["terminal_observation"]
+            if self.behaviour_descriptor:
+                next_obs = infos[0]["terminal_observation"]["observation"]
+            else:
+                next_obs = infos[0]["terminal_observation"]
             # VecNormalize normalizes the terminal observation
             if self._vec_normalize_env is not None:
                 next_obs = self._vec_normalize_env.unnormalize_obs(next_obs)
@@ -1032,13 +1059,25 @@ class DIAYN(SAC):
             next_obs = new_obs_
         if disc_obs is not None:
             replay_buffer.add(
-                self._last_original_obs, next_obs, buffer_action, reward_, done, z, disc_obs, self._episode_num
+                self._last_original_obs,
+                next_obs,
+                buffer_action,
+                reward_,
+                done,
+                z,
+                disc_obs,
+                self._episode_num,
             )
-
 
         else:
             replay_buffer.add(
-                self._last_original_obs, next_obs, buffer_action, reward_, done, z, self._episode_num
+                self._last_original_obs,
+                next_obs,
+                buffer_action,
+                reward_,
+                done,
+                z,
+                self._episode_num,
             )
 
         self._last_obs = new_obs
@@ -1067,6 +1106,8 @@ class DIAYN(SAC):
             and scaled action that will be stored in the replay buffer.
             The two differs when the action space is not normalized (bounds are not [-1, 1]).
         """
+        if isinstance(self._last_obs, dict):
+            self._last_obs = self._last_obs["observation"]
         # Select action randomly or according to policy
         if self.num_timesteps < learning_starts and not (
             self.use_sde and self.use_sde_at_warmup
@@ -1168,7 +1209,7 @@ class DIAYN(SAC):
         )
 
         # load parameters
-        #print(data)
+        # print(data)
         model.__dict__.update(data)
         model.__dict__.update(kwargs)
         model._setup_model()
@@ -1211,13 +1252,11 @@ class DIAYN(SAC):
                 safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]),
             )
 
-            
             for i in range(self.prior.event_shape[0]):
 
-  
-                mean_diayn_reward  = np.array([
-                    ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer
-                ])
+                mean_diayn_reward = np.array(
+                    [ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer]
+                )
 
                 mean_diayn_reward = safe_mean(
                     mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
@@ -1228,8 +1267,6 @@ class DIAYN(SAC):
 
                 self.logger.record(
                     f"diayn/ep_diayn_reward_mean_skill_{i}", mean_diayn_reward
-
-
                 )
 
                 if self.combined_rewards:
@@ -1238,23 +1275,20 @@ class DIAYN(SAC):
                         beta = self.ep_info_buffer[-1].get(f"beta_{i}")
                         self.logger.record(f"train/beta_{i}", beta)
 
-
-
-                mean_true_reward = np.array([
-                    ep_info.get(f"r_true_{i}") for ep_info in self.ep_info_buffer
-                ])
+                mean_true_reward = np.array(
+                    [ep_info.get(f"r_true_{i}") for ep_info in self.ep_info_buffer]
+                )
 
                 mean_true_reward = safe_mean(
                     mean_true_reward, where=~np.isnan(mean_true_reward)
                 )
                 if np.isnan(mean_true_reward):
-                    #print("Mean reward is Nan")
+                    # print("Mean reward is Nan")
                     mean_true_reward = 0.0
 
                 self.logger.record(
                     f"diayn/ep_true_reward_mean_skill_{i}", mean_true_reward
                 )
-
 
         self.logger.record("time/fps", fps)
         self.logger.record(
