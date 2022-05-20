@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import gym
 import numpy as np
 import torch as th
+from torch.distributions.categorical import Categorical
+
 from numpy.core.fromnumeric import mean
 from numpy.lib.index_tricks import diag_indices
 from scipy.special import expit as sigm
@@ -146,7 +148,6 @@ class SILIAYN(SAC):
         _init_setup_model: bool = True,
         disc_on: Union[list, str, DiscriminatorFunction] = "all",
         discriminator_kwargs: dict = {},
-        external_disc_shape: np.ndarray = None,
         combined_rewards: bool = False,
         beta: float = None,
         smerl: int = None,
@@ -182,7 +183,6 @@ class SILIAYN(SAC):
             optimize_memory_usage=optimize_memory_usage,
             supported_action_spaces=(gym.spaces.Box),
         )
-        self.v1 = True
         self.episode_buffer_size = episode_buffer_size
         self.target_entropy = target_entropy
         self.log_ent_coef = None  # type: Optional[th.Tensor]
@@ -198,7 +198,6 @@ class SILIAYN(SAC):
             self.discriminator_kwargs["net_arch"] = [256, 256]
         if self.discriminator_kwargs.get("arch_type") is None:
             self.discriminator_kwargs["arch_type"] = "Mlp"
-        self.external_disc_shape = external_disc_shape
         assert (
             disc_on == "all"
             or isinstance(disc_on, list)
@@ -218,9 +217,7 @@ class SILIAYN(SAC):
         self.behaviour_descriptor = behaviour_descriptor
         self.metric_loggers = metric_loggers
 
-        if self.external_disc_shape:
-            self.disc_obs_space_shape = self.external_disc_shape
-        elif self.behaviour_descriptor:
+        if self.behaviour_descriptor:
             self.disc_obs_space_shape = tuple([len(env.descriptors_names)])
         else:
             self.disc_obs_space_shape = env.observation_space.shape[0]
@@ -238,6 +235,7 @@ class SILIAYN(SAC):
 
         if _init_setup_model:
             self._setup_model()
+            self._sil_setup_model()
 
     def _setup_model(self) -> None:
         # not calling super() because we change the way policy is instantiated
@@ -317,19 +315,8 @@ class SILIAYN(SAC):
             )
         else:
             # Force conversion to float
-            # this will throw an error if a malformed string (different from 'auto')
-            # is passed
+            # this will throw an error if a malformed string (different from 'auto') is passed
             self.ent_coef_tensor = th.tensor(float(self.ent_coef)).to(self.device)
-
-    def _sil_setup_model(self) -> None:
-        self.replay_buffer_skill = []
-
-        for i in range(self.n_skills):
-            new_skill_replay_buffer = ReplayBuffer (self.buffer_size,self.observation_space,
-                                                    self.action_space,self.device,
-                                                    optimize_memory_usage=self.optimize_memory_usage)
-            self.replay_buffer_skill.append(new_skill_replay_buffer)
-
 
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
@@ -350,32 +337,20 @@ class SILIAYN(SAC):
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
-
-            # In v1 we compute the diversity reward here
             # starting by beta
             betas = np.zeros(self.n_skills)
             for z_idx in range(self.n_skills):
                 if self.combined_rewards:
-                    mean_true_rewards = [
-                        ep_info.get(f"r_true_{z_idx}")
-                        for ep_info in self.ep_info_buffer
-                    ]
+                    mean_true_rewards = [ep_info.get(f"r_true_{z_idx}")
+                                            for ep_info in self.ep_info_buffer]
 
-                    mean_true_reward = safe_mean(
-                        mean_true_rewards, where=~np.isnan(mean_true_rewards)
-                    )
-
+                    mean_true_reward = safe_mean(mean_true_rewards, where=~np.isnan(mean_true_rewards))
                     if np.isnan(mean_true_reward):
                         mean_true_reward = 0.0
 
-                    mean_diayn_reward = [
-                        ep_info.get(f"r_diayn_{z_idx}")
-                        for ep_info in self.ep_info_buffer
-                    ]
-
-                    mean_diayn_reward = safe_mean(
-                        mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
-                    )
+                    mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}")
+                                            for ep_info in self.ep_info_buffer]
+                    mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
 
                     if np.isnan(mean_diayn_reward):
                         mean_diayn_reward = 0.0
@@ -389,9 +364,7 @@ class SILIAYN(SAC):
                     betas[z_idx] = beta_on
 
 
-            replay_data = self.replay_buffer.sample(
-                batch_size, env=self._vec_normalize_env
-            )
+            replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
             obs = replay_data.observations
             zs = replay_data.zs
             next_obs = replay_data.next_observations
@@ -417,20 +390,14 @@ class SILIAYN(SAC):
                 betas = th.Tensor(betas) * zs
                 diayn_reward = diayn_reward * betas
                 if self.mean_reward:
-                    rewards = (
-                        true_reward
-                        + diayn_reward.sum(dim=1, keepdim=True)
-                        / len_episodes[:, None]
-                    )
+                    rewards = (true_reward + diayn_reward.sum(dim=1, keepdim=True)
+                        / len_episodes[:, None])
                 else:
-                    rewards = true_reward + diayn_reward.sum(
-                        dim=1, keepdim=True
-                    )
+                    rewards = true_reward + diayn_reward.sum(dim=1, keepdim=True)
 
             else:
                 diayn_reward = diayn_reward * zs
                 rewards = diayn_reward.sum(dim=1, keepdim=True)
-
 
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
@@ -438,7 +405,6 @@ class SILIAYN(SAC):
 
             # Action by the current actor for the sampled state
             # We concatenate state with current one hot encoded skill
-
             obs = th.cat([obs, zs], dim=1)
 
             actions_pi, log_prob = self.actor.action_log_prob(obs)
@@ -485,12 +451,8 @@ class SILIAYN(SAC):
 
             current_q_values = self.critic(obs, actions)
             # Compute critic loss
-            critic_loss = 0.5 * sum(
-                [
-                    F.mse_loss(current_q, target_q_values)
-                    for current_q in current_q_values
-                ]
-            )
+            critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values)
+                                            for current_q in current_q_values])
             critic_losses.append(critic_loss.item())
 
             # Optimize the critic
@@ -532,6 +494,8 @@ class SILIAYN(SAC):
 
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
+
+
 
     def learn(
         self,
@@ -592,6 +556,126 @@ class SILIAYN(SAC):
         callback.on_training_end()
         return self
 
+
+    ######### SIL PART #########
+    ######### SIL PART #########
+    ######### SIL PART #########
+    ######### SIL PART #########
+    ######### SIL PART #########
+    def _sil_setup_model(self) -> None:
+        self.replay_buffer_skill = []
+        self.running_episodes = [[] for _ in range(self.n_skills)]
+
+        for i in range(self.n_skills):
+            new_skill_replay_buffer = ReplayBuffer (self.buffer_size,self.observation_space,
+                                                    self.action_space,self.device,
+                                                    optimize_memory_usage=self.optimize_memory_usage)
+            self.replay_buffer_skill.append(new_skill_replay_buffer)
+
+    def step_sil(self, obs, action, reward, done, z_idx: int):
+        self.running_episodes[z_idx].append([obs, action, reward])
+        if done:
+            self.update_buffer(self.running_episodes[z_idx], z_idx)
+            self.running_episodes[z_idx] = []
+
+    def update_buffer(self, trajectory, z_idx):
+        positive_reward = False
+        for (ob, a, r) in trajectory:
+            if r > 0:
+                positive_reward = True
+                break
+        if positive_reward:
+            self.add_episode(trajectory, z_idx)
+
+    def add_episode(self, trajectory, z_idx):
+        obs, actions, rewards, dones = [], [], [], []
+        for (ob, action, reward) in trajectory:
+            obs.append(ob)
+            actions.append(action)
+            rewards.append(reward)
+            dones.append(False)
+        dones[len(dones) - 1] = True
+        returns = self.discount_with_dones(rewards, dones, self.gamma)
+
+        for (ob, action, R) in list(zip(obs, actions, returns)):
+            self.replay_buffer_skill[z_idx].add(ob, action, R)
+
+    def discount_with_dones(self, rewards, dones, gamma):
+        discounted = []
+        r = 0
+        for reward, done in zip(rewards[::-1], dones[::-1]):
+            r = reward + gamma * r * (1. - done)
+            discounted.append(r)
+        return discounted[::-1]
+
+
+    def train_sil(self,z_idx):
+        # for n in range(self.args.n_update):
+        obs, actions, returns = self.replay_buffer_skill.sample(self.batch_size)
+                                              # self.replay_buffer      .sample(batch_size, env=self._vec_normalize_env)
+        mean_adv, num_valid_samples = 0, 0
+
+        if obs is not None:
+            # need to get the masks
+            # get basic information of network..
+            obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
+            actions = torch.tensor(actions, dtype=torch.float32).unsqueeze(1).to(self.device)
+            returns = torch.tensor(returns, dtype=torch.float32).unsqueeze(1).to(self.device)
+            weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(self.device)
+            max_nlogp = torch.tensor(np.ones((len(idxes), 1)) * self.args.max_nlogp, dtype=torch.float32).to(self.device)
+
+            # start to next...
+            value, pi = self.network(obs)
+            cate_dist = Categorical(pi)
+            action_log_probs = cate_dist.log_prob(actions.squeeze(-1)).unsqueeze(-1)
+            dist_entropy     = cate_dist.entropy().unsqueeze(-1)
+            action_log_probs = -action_log_probs
+            clipped_nlogp = torch.min(action_log_probs, max_nlogp)
+            # process returns
+            advantages = returns - value
+            advantages = advantages.detach()
+            masks = (advantages.cpu().numpy() > 0).astype(np.float32)
+
+            # get the num of vaild samples
+            num_valid_samples = np.sum(masks)
+            num_samples = np.max([num_valid_samples, self.batch_size])
+            # process the mask
+            masks = torch.tensor(masks, dtype=torch.float32).to(self.device)
+            ## clip the advantages... ###### NO CLIPPING!!
+            # clipped_advantages = torch.clamp(advantages, 0, self.args.clip)
+            # mean_adv = torch.sum(clipped_advantages) / num_samples 
+            # mean_adv = mean_adv.item() 
+            mean_adv = advantages / num_samples
+            # start to get the action loss...
+            action_loss = torch.sum(clipped_advantages * weights * clipped_nlogp) / num_samples
+            entropy_reg = torch.sum(weights * dist_entropy * masks) / num_samples
+            policy_loss = action_loss - entropy_reg * self.entropy_coef
+
+            # start to process the value loss..
+            # get the value loss ###### NO CLIPPING!! ONLY ReLU works.
+            # delta = torch.clamp(value - returns, -self.clip, 0) * masks
+            delta = torch.clamp(value - returns, float('-inf'), 0) * masks
+            delta = delta.detach()
+            value_loss = torch.sum(weights * value * delta) / num_samples
+            total_loss = policy_loss + 0.5 * self.w_value * value_loss
+            
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.args.max_grad_norm)
+            self.optimizer.step()
+
+        return mean_adv, num_valid_samples
+
+
+
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+
+
+
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -646,8 +730,7 @@ class SILIAYN(SAC):
             observed_episode_reward = 0.0
             while not done:
 
-                if (
-                    self.use_sde
+                if (self.use_sde
                     and self.sde_sample_freq > 0
                     and num_collected_steps % self.sde_sample_freq == 0
                 ):
@@ -665,6 +748,7 @@ class SILIAYN(SAC):
                     new_obs = new_obs["observation"]
                 else:
                     new_obs, true_reward, done, infos = env.step(action)
+                
                 done = done[0]
 
                 # get the observation of the discriminator
@@ -675,23 +759,14 @@ class SILIAYN(SAC):
 
                 # compute the forward pass of the discriminator
                 z_idx = np.argmax(z.cpu())
-
-
-                log_q_phi = (
-                    self.discriminator(disc_obs)[:, z.argmax()]
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
+                log_q_phi = (self.discriminator(disc_obs)[:, z_idx].detach().cpu().numpy())
 
                 if isinstance(self.log_p_z, th.Tensor):
                     self.log_p_z = self.log_p_z.cpu().numpy()
 
                 # compute diversity reward
-                diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
-
                 # beta update and logging
-
+                diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
                 if self.combined_rewards:
                     if self.beta == "auto":
                         pass
@@ -699,6 +774,7 @@ class SILIAYN(SAC):
                         reward = beta * diayn_reward + true_reward
                 else:
                     reward = diayn_reward
+
 
                 self.num_timesteps += 1
                 episode_timesteps += 1
@@ -722,7 +798,6 @@ class SILIAYN(SAC):
                 observed_episode_reward += reward
 
                 # Retrieve reward and episode length if using Monitor wrapper
-
                 for idx, info in enumerate(infos):
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
@@ -743,28 +818,14 @@ class SILIAYN(SAC):
 
                 # Store data in replay buffer (normalized action and unnormalized observation)
                 z_store = z.clone().detach().cpu().numpy()
-                if self.v1:
-                    reward = true_reward
+                reward = true_reward
 
-                if not self.external_disc_shape:
-                    disc_obs = None
-
-                self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z_store, disc_obs)
-
-                self._update_current_progress_remaining(
-                    self.num_timesteps, self._total_timesteps
-                )
-
-                # For DQN, check if the target network should be updated
-                # and update the exploration schedule
-                # For SAC/TD3, the update is done as the same time as the gradient update
-                # see https://github.com/hill-a/stable-baselines/issues/900
+                self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z_store)
+                self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
                 self._on_step()
 
-                if not should_collect_more_steps(
-                    train_freq, num_collected_steps, num_collected_episodes
-                ):
-                    break
+                # if not should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
+                #     break
 
             if done:
                 self.len_episodes[self._episode_num] = num_collected_steps
@@ -779,6 +840,9 @@ class SILIAYN(SAC):
                 # Log training infos
                 if log_interval is not None and self._episode_num % log_interval == 0:
                     self._dump_logs()
+
+
+
 
         diayn_mean_reward = (
             np.mean(diayn_episode_rewards) if num_collected_episodes > 0 else 0.0
@@ -801,7 +865,6 @@ class SILIAYN(SAC):
         done: np.ndarray,
         infos: List[Dict[str, Any]],
         z: np.ndarray,
-        disc_obs: Optional[np.ndarray] = None,
     ) -> None:
         """
         Store transition in the replay buffer.
@@ -840,28 +903,8 @@ class SILIAYN(SAC):
                 next_obs = self._vec_normalize_env.unnormalize_obs(next_obs)
         else:
             next_obs = new_obs_
-        if disc_obs is not None:
-            replay_buffer.add(
-                self._last_original_obs,
-                next_obs,
-                buffer_action,
-                reward_,
-                done,
-                z,
-                disc_obs,
-                self._episode_num,
-            )
-
-        else:
-            replay_buffer.add(
-                self._last_original_obs,
-                next_obs,
-                buffer_action,
-                reward_,
-                done,
-                z,
-                self._episode_num,
-            )
+        replay_buffer.add(self._last_original_obs, next_obs, buffer_action, reward_, done, z, self._episode_num,)
+        self.step_sil    (self._last_original_obs,           buffer_action, reward_, done, z.argmax())
 
         self._last_obs = new_obs
         # Save the unnormalized observation
