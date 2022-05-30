@@ -55,7 +55,6 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.siliayn import disc
 from stable_baselines3.siliayn.disc import Discriminator
 from stable_baselines3.siliayn.policies import DIAYNPolicy
-from stable_baselines3.siliayn.sil_module import sil_module
 
 
 class SILIAYN(SAC):
@@ -552,6 +551,7 @@ class SILIAYN(SAC):
                 )
 
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
+                self.train_sil(z)
 
         callback.on_training_end()
         return self
