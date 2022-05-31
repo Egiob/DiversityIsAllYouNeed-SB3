@@ -616,6 +616,11 @@ class DIAYN(SAC):
             actor_loss.backward()
             self.actor.optimizer.step()
 
+            print("CRITIC LOSS")
+            print(critic_loss)
+            print("ACTOR LOSS")
+            print(actor_loss)
+
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(

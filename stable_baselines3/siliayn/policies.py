@@ -294,6 +294,7 @@ class DIAYNPolicy(BasePolicy):
         obs_shape = list(self.observation_space.shape)
         z_size = self.prior.event_shape[0]
         obs_shape[0] += z_size  # for z dimension
+
         observation = observation.reshape([-1,] + obs_shape)
 
         observation = th.as_tensor(observation).to(self.device)

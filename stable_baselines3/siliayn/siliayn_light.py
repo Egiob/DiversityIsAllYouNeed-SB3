@@ -55,6 +55,7 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.siliayn import disc
 from stable_baselines3.siliayn.disc import Discriminator
 from stable_baselines3.siliayn.policies import DIAYNPolicy
+import random
 
 
 class SILIAYN(SAC):
@@ -123,12 +124,12 @@ class SILIAYN(SAC):
         env: Union[GymEnv, str],
         prior: th.distributions,
         learning_rate: Union[float, Schedule] = 3e-4,
-        buffer_size: int = 1000000,
+        buffer_size: int = 10000,
         learning_starts: int = 100,
         batch_size: int = 256,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: Union[int, Tuple[int, str]] = 1,
+        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = 1,
         action_noise: Optional[ActionNoise] = None,
         optimize_memory_usage: bool = False,
@@ -472,6 +473,10 @@ class SILIAYN(SAC):
             actor_loss.backward()
             self.actor.optimizer.step()
 
+            # print("CRITIC LOSS")
+            # print(critic_loss)
+            # print("ACTOR LOSS")
+            # print(actor_loss)
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(
@@ -528,6 +533,8 @@ class SILIAYN(SAC):
         while self.num_timesteps < total_timesteps:
             # sample skill z according to prior before generating episode
             z = self.prior.sample().to(self.device)
+            z_idx = np.argmax(z.cpu())
+
             rollout = self.collect_rollouts(
                 self.env,
                 train_freq=self.train_freq,
@@ -551,7 +558,7 @@ class SILIAYN(SAC):
                 )
 
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
-                self.train_sil(z)
+                self.train_sil(z_idx)
 
         callback.on_training_end()
         return self
@@ -562,47 +569,54 @@ class SILIAYN(SAC):
     ######### SIL PART #########
     ######### SIL PART #########
     ######### SIL PART #########
+
     def _sil_setup_model(self) -> None:
         self.replay_buffer_skill = []
         self.running_episodes = [[] for _ in range(self.n_skills)]
-
+        # print(self.observation_space.shape)
         for i in range(self.n_skills):
-            new_skill_replay_buffer = ReplayBuffer (self.buffer_size,self.observation_space,
-                                                    self.action_space,self.device,
-                                                    optimize_memory_usage=self.optimize_memory_usage)
+            new_skill_replay_buffer = SilReplayBuffer (self.buffer_size)
             self.replay_buffer_skill.append(new_skill_replay_buffer)
 
-    def step_sil(self, obs, action, reward, done, z_idx: int):
+    def step_sil(self, obs, action, reward, done, z):
+        # print("SKILL: {}".format(z_idx))
+        z_idx = z.argmax()
         self.running_episodes[z_idx].append([obs, action, reward])
         if done:
-            self.update_buffer(self.running_episodes[z_idx], z_idx)
+            self.update_buffer(self.running_episodes[z_idx], z)
             self.running_episodes[z_idx] = []
 
-    def update_buffer(self, trajectory, z_idx):
+    def update_buffer(self, trajectory, z):
         positive_reward = False
+        return
         for (ob, a, r) in trajectory:
             if r > 0:
                 positive_reward = True
                 break
-        if positive_reward:
-            self.add_episode(trajectory, z_idx)
+        # print(trajectory)
+        # if positive_reward:
+        self.add_episode(trajectory, z)
 
-    def add_episode(self, trajectory, z_idx):
+    def add_episode(self, trajectory, z):
+        z_idx = z.argmax()
         obs, actions, rewards, dones = [], [], [], []
         for (ob, action, reward) in trajectory:
-            obs.append(ob)
+            ob_concat = np.concatenate([ob, z[None]], axis=1)
+            obs.append(ob_concat)
             actions.append(action)
             rewards.append(reward)
             dones.append(False)
         dones[len(dones) - 1] = True
         returns = self.discount_with_dones(rewards, dones, self.gamma)
-
-        for (ob, action, R) in list(zip(obs, actions, returns)):
+        # print("ADD Episode:")
+        # print(returns)
+        for (ob, action, R, done) in list(zip(obs, actions, returns, dones)):
             self.replay_buffer_skill[z_idx].add(ob, action, R)
 
     def discount_with_dones(self, rewards, dones, gamma):
         discounted = []
         r = 0
+        # print(rewards)
         for reward, done in zip(rewards[::-1], dones[::-1]):
             r = reward + gamma * r * (1. - done)
             discounted.append(r)
@@ -611,28 +625,36 @@ class SILIAYN(SAC):
 
     def train_sil(self,z_idx):
         # for n in range(self.args.n_update):
-        obs, actions, returns = self.replay_buffer_skill.sample(self.batch_size)
+        # self.replay_buffer_skill[z_idx].sample(self.batch_size)
+        if( len(self.replay_buffer_skill[z_idx]) < self.batch_size): return
+        obs, actions, returns = self.replay_buffer_skill[z_idx].sample(self.batch_size)
                                               # self.replay_buffer      .sample(batch_size, env=self._vec_normalize_env)
+
         mean_adv, num_valid_samples = 0, 0
 
         if obs is not None:
             # need to get the masks
             # get basic information of network..
-            obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-            actions = torch.tensor(actions, dtype=torch.float32).unsqueeze(1).to(self.device)
-            returns = torch.tensor(returns, dtype=torch.float32).unsqueeze(1).to(self.device)
-            weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(self.device)
-            max_nlogp = torch.tensor(np.ones((len(idxes), 1)) * self.args.max_nlogp, dtype=torch.float32).to(self.device)
+            obs         = th.tensor(obs, dtype=th.float32).reshape(self.batch_size, -1).to(self.device)
+            actions     = th.tensor(actions, dtype=th.float32).reshape(self.batch_size, -1).to(self.device)
+            returns     = th.tensor(returns, dtype=th.float32).reshape(self.batch_size, -1).to(self.device)
+            # max_nlogp   = th.tensor(np.ones((len(obs), 1)) * self.args.max_nlogp, dtype=th.float32).to(self.device)
 
             # start to next...
-            value, pi = self.network(obs)
-            cate_dist = Categorical(pi)
-            action_log_probs = cate_dist.log_prob(actions.squeeze(-1)).unsqueeze(-1)
-            dist_entropy     = cate_dist.entropy().unsqueeze(-1)
-            action_log_probs = -action_log_probs
-            clipped_nlogp = torch.min(action_log_probs, max_nlogp)
+            actions_pi, log_prob = self.actor.action_log_prob(obs)
+            # unscaled_action, _ = self.predict(obs) # predict uses actor internally. See policies.py.
+            critic_value       = self.critic (obs, actions_pi)
+            critic_value       = critic_value[0]
+            # value, pi = unscaled_action, current_q_values
+            # value, pi = self.network(obs)
+            pi = actions_pi
+            # cate_dist = Categorical(pi)
+            action_log_probs = - log_prob # -cate_dist.log_prob(actions.squeeze(-1)).unsqueeze(-1)
+            # dist_entropy     = cate_dist.entropy().unsqueeze(-1)
+            
+            # clipped_nlogp = th.min(action_log_probs, max_nlogp)
             # process returns
-            advantages = returns - value
+            advantages = returns - critic_value
             advantages = advantages.detach()
             masks = (advantages.cpu().numpy() > 0).astype(np.float32)
 
@@ -640,29 +662,45 @@ class SILIAYN(SAC):
             num_valid_samples = np.sum(masks)
             num_samples = np.max([num_valid_samples, self.batch_size])
             # process the mask
-            masks = torch.tensor(masks, dtype=torch.float32).to(self.device)
+            masks = th.tensor(masks, dtype=th.float32).to(self.device)
             ## clip the advantages... ###### NO CLIPPING!!
-            # clipped_advantages = torch.clamp(advantages, 0, self.args.clip)
-            # mean_adv = torch.sum(clipped_advantages) / num_samples 
+            # clipped_advantages = th.clamp(advantages, 0, self.args.clip)
+            clipped_advantages = advantages * masks
+            # mean_adv = th.sum(clipped_advantages) / num_samples 
             # mean_adv = mean_adv.item() 
             mean_adv = advantages / num_samples
             # start to get the action loss...
-            action_loss = torch.sum(clipped_advantages * weights * clipped_nlogp) / num_samples
-            entropy_reg = torch.sum(weights * dist_entropy * masks) / num_samples
-            policy_loss = action_loss - entropy_reg * self.entropy_coef
+            # print(action_log_probs)
+
+            action_loss = th.sum(clipped_advantages * action_log_probs) / num_samples
+            entropy_reg = th.sum(action_log_probs * masks) / num_samples
+            policy_loss = action_loss #- entropy_reg * self.entropy_coef
 
             # start to process the value loss..
             # get the value loss ###### NO CLIPPING!! ONLY ReLU works.
-            # delta = torch.clamp(value - returns, -self.clip, 0) * masks
-            delta = torch.clamp(value - returns, float('-inf'), 0) * masks
+            # delta = th.clamp(value - returns, -self.clip, 0) * masks
+            delta = advantages * masks
             delta = delta.detach()
-            value_loss = torch.sum(weights * value * delta) / num_samples
-            total_loss = policy_loss + 0.5 * self.w_value * value_loss
-            
-            self.optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.args.max_grad_norm)
-            self.optimizer.step()
+            # print("SKILL: {}".format(z_idx))
+            # print("Returns:")
+            # print(returns.detach().view(-1))
+            # print("Critic:")
+            # print(critic_value.detach().view(-1))
+            # print(delta.detach().view(-1))
+            # print(critic_value*delta)
+            VAL_COEFF = 0.05
+            value_loss = 0.5*VAL_COEFF * th.sum(delta * delta) / num_samples
+            # total_loss = policy_loss + 0.5 * VAL_COEFF * value_loss
+
+            print(value_loss)            
+            self.critic.optimizer.zero_grad()
+            value_loss.backward(retain_graph=True)   # Update critic
+            self.critic.optimizer.step()
+
+            self.actor.optimizer.zero_grad()
+            policy_loss.backward()  # Update actor
+            self.actor.optimizer.step()
+
 
         return mean_adv, num_valid_samples
 
@@ -818,8 +856,7 @@ class SILIAYN(SAC):
 
                 # Store data in replay buffer (normalized action and unnormalized observation)
                 z_store = z.clone().detach().cpu().numpy()
-                reward = true_reward
-
+                # reward = true_reward
                 self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z_store)
                 self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
                 self._on_step()
@@ -828,6 +865,7 @@ class SILIAYN(SAC):
                 #     break
 
             if done:
+                # print(self._episode_num)
                 self.len_episodes[self._episode_num] = num_collected_steps
                 num_collected_episodes += 1
                 self._episode_num += 1
@@ -904,7 +942,7 @@ class SILIAYN(SAC):
         else:
             next_obs = new_obs_
         replay_buffer.add(self._last_original_obs, next_obs, buffer_action, reward_, done, z, self._episode_num,)
-        self.step_sil    (self._last_original_obs,           buffer_action, reward_, done, z.argmax())
+        self.step_sil    (self._last_original_obs,           buffer_action, reward_, done, z)
 
         self._last_obs = new_obs
         # Save the unnormalized observation
@@ -1152,3 +1190,66 @@ class SILIAYN(SAC):
         else:
             saved_pytorch_variables.append("ent_coef_tensor")
         return state_dicts, saved_pytorch_variables
+
+
+######## Sil Data Structures ########
+######## Sil Data Structures ########
+######## Sil Data Structures ########
+
+class SilReplayBuffer(object):
+    def __init__(self, size):
+        """Create Prioritized Replay buffer.
+        Parameters
+        ----------
+        size: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        """
+        self._storage = []
+        self._maxsize = size
+        self._next_idx = 0
+
+    def __len__(self):
+        return len(self._storage)
+    
+    def add(self, obs_t, action, R):
+        data = (obs_t, action, R)
+
+        if self._next_idx >= len(self._storage):
+            self._storage.append(data)
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+    def _encode_sample(self, idxes):
+        obses_t, actions, returns= [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, R = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            returns.append(R)
+        return np.array(obses_t), np.array(actions), np.array(returns)
+
+    def sample(self, batch_size):
+        """Sample a batch of experiences.
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+        Returns
+        -------
+        obs_batch: np.array
+            batch of observations
+        act_batch: np.array
+            batch of actions executed given obs_batch
+        rew_batch: np.array
+            rewards received as results of executing act_batch
+        next_obs_batch: np.array
+            next set of observations seen after executing act_batch
+        done_mask: np.array
+            done_mask[i] = 1 if executing act_batch[i] resulted in
+            the end of an episode and 0 otherwise.
+        """
+        idxes = [random.randint(0, len(self._storage) - 1) for _ in range(batch_size)]
+        return self._encode_sample(idxes)
