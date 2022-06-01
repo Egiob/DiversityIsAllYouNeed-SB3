@@ -1,6 +1,7 @@
 import io
 import pathlib
 import sys
+from datetime import datetime
 import time
 from collections import deque
 from logging import log
@@ -124,7 +125,7 @@ class SILIAYN(SAC):
         env: Union[GymEnv, str],
         prior: th.distributions,
         learning_rate: Union[float, Schedule] = 3e-4,
-        buffer_size: int = 10000,
+        buffer_size: int = 100000,
         learning_starts: int = 100,
         batch_size: int = 256,
         tau: float = 0.005,
@@ -148,8 +149,8 @@ class SILIAYN(SAC):
         _init_setup_model: bool = True,
         disc_on: Union[list, str, DiscriminatorFunction] = "all",
         discriminator_kwargs: dict = {},
-        combined_rewards: bool = False,
-        beta: float = None,
+        combined_rewards: bool = True,
+        beta: float = 1,
         smerl: int = None,
         eps: float = 0.05,
         beta_temp: float = 20.0,
@@ -328,6 +329,15 @@ class SILIAYN(SAC):
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
 
+        MODEL_CHKPOINT_PERIOD = 100_000 # Save checkpoint model for every 100k steps
+        if self.num_timesteps % MODEL_CHKPOINT_PERIOD == 0:
+            now = datetime.now()
+            current_time = now.strftime("%y_%m_%d_%H_%M_%S")
+            kilo_steps = int(self.num_timesteps / 1000)
+            self.save(f"autosave_siliayn_{kilo_steps}k_{current_time}")
+
+
+
         ent_coef_losses, ent_coefs = deque(maxlen=100), deque(maxlen=100)
         (actor_losses, critic_losses, disc_losses) = (
             deque(maxlen=100),
@@ -355,13 +365,8 @@ class SILIAYN(SAC):
                     if np.isnan(mean_diayn_reward):
                         mean_diayn_reward = 0.0
 
-                    if self.adaptive_beta:
-                        beta = self.adaptive_beta / (np.abs(mean_diayn_reward) + 1)
-                    else:
-                        beta = self.beta
-
-                    beta_on = beta
-                    betas[z_idx] = beta_on
+                    beta = self.beta
+                    betas[z_idx] = beta
 
 
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
@@ -387,7 +392,7 @@ class SILIAYN(SAC):
             diayn_reward = log_q_phi.clone().detach() - self.log_p_z[0]
 
             if self.combined_rewards:
-                betas = th.Tensor(betas) * zs
+                betas = th.Tensor(betas).to(self.device) * zs
                 diayn_reward = diayn_reward * betas
                 if self.mean_reward:
                     rewards = (true_reward + diayn_reward.sum(dim=1, keepdim=True)
@@ -473,10 +478,10 @@ class SILIAYN(SAC):
             actor_loss.backward()
             self.actor.optimizer.step()
 
-            # print("CRITIC LOSS")
-            # print(critic_loss)
-            # print("ACTOR LOSS")
-            # print(actor_loss)
+            print("CRITIC LOSS")
+            print(critic_loss)
+            print("ACTOR LOSS")
+            print(actor_loss)
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(
@@ -574,35 +579,39 @@ class SILIAYN(SAC):
         self.replay_buffer_skill = []
         self.running_episodes = [[] for _ in range(self.n_skills)]
         # print(self.observation_space.shape)
+        self.sil_buffer_size = 4096
+        self.sil_batch_size = 64
         for i in range(self.n_skills):
-            new_skill_replay_buffer = SilReplayBuffer (self.buffer_size)
+            new_skill_replay_buffer = SilReplayBuffer (self.sil_buffer_size)
             self.replay_buffer_skill.append(new_skill_replay_buffer)
 
-    def step_sil(self, obs, action, reward, done, z):
+    def step_sil(self, obs, n_obs, action, reward, done, z):
         # print("SKILL: {}".format(z_idx))
         z_idx = z.argmax()
-        self.running_episodes[z_idx].append([obs, action, reward])
+        self.running_episodes[z_idx].append([obs, n_obs, action, reward])
         if done:
             self.update_buffer(self.running_episodes[z_idx], z)
             self.running_episodes[z_idx] = []
 
     def update_buffer(self, trajectory, z):
-        positive_reward = False
-        return
-        for (ob, a, r) in trajectory:
-            if r > 0:
-                positive_reward = True
-                break
+        # positive_reward = False
+        # for (ob, n_ob, a, r) in trajectory:
+        #     if r > 0:
+        #         positive_reward = True
+        #         break
         # print(trajectory)
         # if positive_reward:
         self.add_episode(trajectory, z)
 
     def add_episode(self, trajectory, z):
         z_idx = z.argmax()
-        obs, actions, rewards, dones = [], [], [], []
-        for (ob, action, reward) in trajectory:
-            ob_concat = np.concatenate([ob, z[None]], axis=1)
+        obs, n_obs, actions, rewards, dones = [], [], [], [], []
+        for (ob, n_ob, action, reward) in trajectory:
+            ob_concat   = np.concatenate([ob, z[None]], axis=1)
+            # print(n_ob.shape)
+            # n_ob_concat = np.concatenate([n_ob, z[None]], axis=1)
             obs.append(ob_concat)
+            # n_obs.append(n_ob_concat)
             actions.append(action)
             rewards.append(reward)
             dones.append(False)
@@ -610,13 +619,13 @@ class SILIAYN(SAC):
         returns = self.discount_with_dones(rewards, dones, self.gamma)
         # print("ADD Episode:")
         # print(returns)
+
         for (ob, action, R, done) in list(zip(obs, actions, returns, dones)):
             self.replay_buffer_skill[z_idx].add(ob, action, R)
 
     def discount_with_dones(self, rewards, dones, gamma):
         discounted = []
         r = 0
-        # print(rewards)
         for reward, done in zip(rewards[::-1], dones[::-1]):
             r = reward + gamma * r * (1. - done)
             discounted.append(r)
@@ -626,83 +635,65 @@ class SILIAYN(SAC):
     def train_sil(self,z_idx):
         # for n in range(self.args.n_update):
         # self.replay_buffer_skill[z_idx].sample(self.batch_size)
-        if( len(self.replay_buffer_skill[z_idx]) < self.batch_size): return
-        obs, actions, returns = self.replay_buffer_skill[z_idx].sample(self.batch_size)
-                                              # self.replay_buffer      .sample(batch_size, env=self._vec_normalize_env)
+        if( len(self.replay_buffer_skill[z_idx]) < self.sil_batch_size): return
+        obs, actions, returns = self.replay_buffer_skill[z_idx].sample(self.sil_batch_size)
+        num_samples = self.sil_batch_size
 
         mean_adv, num_valid_samples = 0, 0
 
         if obs is not None:
             # need to get the masks
             # get basic information of network..
-            obs         = th.tensor(obs, dtype=th.float32).reshape(self.batch_size, -1).to(self.device)
-            actions     = th.tensor(actions, dtype=th.float32).reshape(self.batch_size, -1).to(self.device)
-            returns     = th.tensor(returns, dtype=th.float32).reshape(self.batch_size, -1).to(self.device)
-            # max_nlogp   = th.tensor(np.ones((len(obs), 1)) * self.args.max_nlogp, dtype=th.float32).to(self.device)
+            obs         = th.tensor(obs,     dtype=th.float32).reshape(self.sil_batch_size, -1).to(self.device)
+            actions     = th.tensor(actions, dtype=th.float32).reshape(self.sil_batch_size, -1).to(self.device)
+            returns     = th.tensor(returns, dtype=th.float32).reshape(self.sil_batch_size, -1).to(self.device)
 
-            # start to next...
-            actions_pi, log_prob = self.actor.action_log_prob(obs)
-            # unscaled_action, _ = self.predict(obs) # predict uses actor internally. See policies.py.
-            critic_value       = self.critic (obs, actions_pi)
-            critic_value       = critic_value[0]
-            # value, pi = unscaled_action, current_q_values
-            # value, pi = self.network(obs)
-            pi = actions_pi
-            # cate_dist = Categorical(pi)
-            action_log_probs = - log_prob # -cate_dist.log_prob(actions.squeeze(-1)).unsqueeze(-1)
-            # dist_entropy     = cate_dist.entropy().unsqueeze(-1)
-            
-            # clipped_nlogp = th.min(action_log_probs, max_nlogp)
-            # process returns
+            # n_actions_pi, log_prob    = self.actor.action_log_prob(n_obs)
+            # next_critic_value = th.cat(self.critic_target(n_obs, n_actions_pi), dim=1)
+            # next_critic_value, _ = th.min(critic_value, dim=1, keepdim=True)
+            # critic_value = rewards + self.gamma * next_critic_value
+
+            actions_pi, log_prob    = self.actor.action_log_prob(obs)
+            critic_value = th.cat(self.critic_target(obs, actions_pi), dim=1)
+            critic_value, _ = th.min(critic_value, dim=1, keepdim=True)
+
             advantages = returns - critic_value
-            advantages = advantages.detach()
-            masks = (advantages.cpu().numpy() > 0).astype(np.float32)
+            mask    = (advantages.cpu().detach().numpy() > 0).astype(np.float32)
+            mask    = th.tensor(mask, dtype=th.float32).to(self.device)
+            returns      *= mask
+            critic_value *= mask
 
-            # get the num of vaild samples
-            num_valid_samples = np.sum(masks)
-            num_samples = np.max([num_valid_samples, self.batch_size])
-            # process the mask
-            masks = th.tensor(masks, dtype=th.float32).to(self.device)
-            ## clip the advantages... ###### NO CLIPPING!!
-            # clipped_advantages = th.clamp(advantages, 0, self.args.clip)
-            clipped_advantages = advantages * masks
-            # mean_adv = th.sum(clipped_advantages) / num_samples 
-            # mean_adv = mean_adv.item() 
-            mean_adv = advantages / num_samples
-            # start to get the action loss...
-            # print(action_log_probs)
-
-            action_loss = th.sum(clipped_advantages * action_log_probs) / num_samples
-            entropy_reg = th.sum(action_log_probs * masks) / num_samples
-            policy_loss = action_loss #- entropy_reg * self.entropy_coef
-
-            # start to process the value loss..
-            # get the value loss ###### NO CLIPPING!! ONLY ReLU works.
-            # delta = th.clamp(value - returns, -self.clip, 0) * masks
-            delta = advantages * masks
-            delta = delta.detach()
-            # print("SKILL: {}".format(z_idx))
-            # print("Returns:")
-            # print(returns.detach().view(-1))
-            # print("Critic:")
-            # print(critic_value.detach().view(-1))
-            # print(delta.detach().view(-1))
-            # print(critic_value*delta)
+            critic_loss = F.mse_loss(returns, critic_value)
             VAL_COEFF = 0.05
-            value_loss = 0.5*VAL_COEFF * th.sum(delta * delta) / num_samples
-            # total_loss = policy_loss + 0.5 * VAL_COEFF * value_loss
+            critic_loss *= 0.5 * VAL_COEFF / num_samples
 
-            print(value_loss)            
+
+
+            print("Update for SIL part: SKILL {}".format(z_idx))
+            print("VALUE")
+            print(critic_loss)
+
             self.critic.optimizer.zero_grad()
-            value_loss.backward(retain_graph=True)   # Update critic
+            critic_loss.backward(retain_graph=True)   # Update critic
             self.critic.optimizer.step()
 
+            critic_value     = th.cat(self.critic.forward(obs, actions), dim=1)
+            critic_value, _  = th.min(critic_value*mask, dim=1, keepdim=True)
+            adv              = returns*mask - critic_value
+            actor_loss       = adv.mean()
+
+            print("ACTOR")
+            print(actor_loss)
+
             self.actor.optimizer.zero_grad()
-            policy_loss.backward()  # Update actor
+            actor_loss.backward()  # Update actor
             self.actor.optimizer.step()
 
+            print(returns.view(-1))
+            print(adv.view(-1))
+            print(advantages.view(-1)*mask)
 
-        return mean_adv, num_valid_samples
+        return 
 
 
 
@@ -806,10 +797,7 @@ class SILIAYN(SAC):
                 # beta update and logging
                 diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
                 if self.combined_rewards:
-                    if self.beta == "auto":
-                        pass
-                    else:
-                        reward = beta * diayn_reward + true_reward
+                    reward = self.beta * diayn_reward + true_reward
                 else:
                     reward = diayn_reward
 
@@ -941,8 +929,9 @@ class SILIAYN(SAC):
                 next_obs = self._vec_normalize_env.unnormalize_obs(next_obs)
         else:
             next_obs = new_obs_
+
         replay_buffer.add(self._last_original_obs, next_obs, buffer_action, reward_, done, z, self._episode_num,)
-        self.step_sil    (self._last_original_obs,           buffer_action, reward_, done, z)
+        self.step_sil    (self._last_original_obs, next_obs, buffer_action, reward_, done, z)
 
         self._last_obs = new_obs
         # Save the unnormalized observation

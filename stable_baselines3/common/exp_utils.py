@@ -231,6 +231,7 @@ def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions
 
         actions.append(action.flatten())
         obs, _, done, _ = env.step(action)
+        env.render()
 
         if done:
             break

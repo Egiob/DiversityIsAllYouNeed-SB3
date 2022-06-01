@@ -369,6 +369,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
         callback.on_training_start(locals(), globals())
 
+        print("Learning starts\n")
+
         while self.num_timesteps < total_timesteps:
             rollout = self.collect_rollouts(
                 self.env,
@@ -391,6 +393,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                     if self.gradient_steps > 0
                     else rollout.episode_timesteps
                 )
+                if self.num_timesteps % 1000 == 0:
+                    print(f"Timestep: \t{int(self.num_timesteps/1000)}k / {int(total_timesteps/1000)}k")
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
 
         callback.on_training_end()
