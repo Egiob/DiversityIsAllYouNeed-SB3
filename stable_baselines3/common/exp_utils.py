@@ -215,7 +215,7 @@ def get_paths(
     return log_path, run_name, save_path, video_path
 
 
-def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions=True):
+def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions=True, mode=None):
     states = []
     actions = []
     env = model.env
@@ -225,18 +225,25 @@ def generate_trajectory(model, skill_idx, episode_length, seed=0, return_actions
     env.seed(seed)
     obs = env.reset()
     states.append(obs.flatten())
+    reward_sum = 0
     for i in range(episode_length - 1):
         obs = np.concatenate([obs, skill[None, :]], axis=1)
         action, _ = model.predict(obs)
 
         actions.append(action.flatten())
-        obs, _, done, _ = env.step(action)
-        env.render()
+        obs, reward, done, _ = env.step(action)
+        reward_sum += reward
+        if mode is None:
+            env.render()
+        else:
+            env.render(mode)
 
         if done:
             break
 
         states.append(obs.flatten())
+
+    print(f'reward sum is {reward_sum}')
 
     states = np.reshape(states, (-1, *model.observation_space.shape))
     actions = np.reshape(actions, (-1, *model.action_space.shape))
@@ -297,6 +304,29 @@ def record_skills(env_id, model, directory, name_prefix="", video_length=400):
         env = DummyVecEnv([lambda: gym.make(env_id)])
         video_env.close()
     env.close()
+
+def record_result(env_id, model, directory, name_prefix="", video_length=400):
+
+    env = DummyVecEnv([lambda: gym.make(env_id)])
+    video_env = VecVideoRecorder(
+        env,
+        directory,
+        record_video_trigger=lambda x: x == 0,
+        video_length=video_length,
+        name_prefix=name_prefix,
+    )
+
+    obs = video_env.reset()
+    for _ in range(video_length + 1):
+        obs = obs
+        action, next_state = model.predict(obs)
+        obs, _, _, _ = video_env.step(action)
+        # Save the video
+    env.close()
+    env = DummyVecEnv([lambda: gym.make(env_id)])
+    video_env.close()
+    env.close()
+
 
 
 def evaluate_jsd_skills(model, n_skills, episode_length, seeds, bins=50):

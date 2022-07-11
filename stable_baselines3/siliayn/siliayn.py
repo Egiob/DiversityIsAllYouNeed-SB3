@@ -1,6 +1,8 @@
 import io
 import pathlib
 import sys
+import csv
+from datetime import datetime
 import time
 from collections import deque
 from logging import log
@@ -10,6 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import gym
 import numpy as np
 import torch as th
+from torch.distributions.categorical import Categorical
+
 from numpy.core.fromnumeric import mean
 from numpy.lib.index_tricks import diag_indices
 from scipy.special import expit as sigm
@@ -19,6 +23,7 @@ from torch.nn import functional as F
 from stable_baselines3 import SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.buffers import (
+    ReplayBuffer,
     ReplayBufferZ,
     ReplayBufferZExternalDisc,
     ReplayBufferZExternalDiscTraj,
@@ -49,9 +54,10 @@ from stable_baselines3.common.utils import (
     should_collect_more_steps,
 )
 from stable_baselines3.common.vec_env import VecEnv
-from stable_baselines3.diayn import disc
-from stable_baselines3.diayn.disc import Discriminator
-from stable_baselines3.diayn.policies import DIAYNPolicy
+from stable_baselines3.siliayn import disc
+from stable_baselines3.siliayn.disc import Discriminator
+from stable_baselines3.siliayn.policies import DIAYNPolicy
+import random
 
 
 class SILIAYN(SAC):
@@ -120,12 +126,12 @@ class SILIAYN(SAC):
         env: Union[GymEnv, str],
         prior: th.distributions,
         learning_rate: Union[float, Schedule] = 3e-4,
-        buffer_size: int = 1000000,
+        buffer_size: int = 100000,
         learning_starts: int = 100,
         batch_size: int = 256,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: Union[int, Tuple[int, str]] = 1,
+        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = 1,
         action_noise: Optional[ActionNoise] = None,
         optimize_memory_usage: bool = False,
@@ -144,36 +150,29 @@ class SILIAYN(SAC):
         _init_setup_model: bool = True,
         disc_on: Union[list, str, DiscriminatorFunction] = "all",
         discriminator_kwargs: dict = {},
-        external_disc_shape: np.ndarray = None,
-        combined_rewards: bool = False,
-        beta: float = None,
+        combined_rewards: bool = True,
+        beta: float = 1,
         smerl: int = None,
         eps: float = 0.05,
         beta_temp: float = 20.0,
         beta_momentum: float = 0.8,
         beta_smooth: bool = None,
         max_steps: int = None,
-        v1=True,
         episode_buffer_size: int = 100,
         mean_reward: bool = None,
         adaptive_beta: float = None,
         qd_grid=None,
         behaviour_descriptor=None,
         metric_loggers=None,
+        supported_action_spaces=(gym.spaces.Box),
     ):
 
         super(SAC, self).__init__(
-            policy,
-            env,
-            DIAYNPolicy,
-            learning_rate,
-            buffer_size,
-            learning_starts,
-            batch_size,
-            tau,
-            gamma,
-            train_freq,
-            gradient_steps,
+            policy, env, DIAYNPolicy,
+            learning_rate,  buffer_size,
+            learning_starts, batch_size,
+            tau, gamma,
+            train_freq,gradient_steps,
             action_noise,
             policy_kwargs=policy_kwargs,
             tensorboard_log=tensorboard_log,
@@ -185,9 +184,8 @@ class SILIAYN(SAC):
             sde_sample_freq=sde_sample_freq,
             use_sde_at_warmup=use_sde_at_warmup,
             optimize_memory_usage=optimize_memory_usage,
-            supported_action_spaces=(gym.spaces.Box),
+            supported_action_spaces=supported_action_spaces,
         )
-        self.v1 = v1
         self.episode_buffer_size = episode_buffer_size
         self.target_entropy = target_entropy
         self.log_ent_coef = None  # type: Optional[th.Tensor]
@@ -203,7 +201,6 @@ class SILIAYN(SAC):
             self.discriminator_kwargs["net_arch"] = [256, 256]
         if self.discriminator_kwargs.get("arch_type") is None:
             self.discriminator_kwargs["arch_type"] = "Mlp"
-        self.external_disc_shape = external_disc_shape
         assert (
             disc_on == "all"
             or isinstance(disc_on, list)
@@ -222,9 +219,8 @@ class SILIAYN(SAC):
         self.max_steps = max_steps
         self.behaviour_descriptor = behaviour_descriptor
         self.metric_loggers = metric_loggers
-        if self.external_disc_shape:
-            self.disc_obs_space_shape = self.external_disc_shape
-        elif self.behaviour_descriptor:
+
+        if self.behaviour_descriptor:
             self.disc_obs_space_shape = tuple([len(env.descriptors_names)])
         else:
             self.disc_obs_space_shape = env.observation_space.shape[0]
@@ -242,11 +238,15 @@ class SILIAYN(SAC):
 
         if _init_setup_model:
             self._setup_model()
+            self._sil_setup_model()
 
     def _setup_model(self) -> None:
         # not calling super() because we change the way policy is instantiated
         self._setup_lr_schedule()
         self.set_random_seed(self.seed)
+        self.MODEL_CHKPOINT_PERIOD = 1_000_000 # Save checkpoint model for every 1M steps
+        self.MODEL_SAVE_STEP = self.MODEL_CHKPOINT_PERIOD
+
         # ReplayBufferZ replaces ReplayBuffer while including z
         if self.beta == "auto" or self.smerl:
             self.beta_buffer = deque(maxlen=self.episode_buffer_size)
@@ -273,43 +273,9 @@ class SILIAYN(SAC):
             **self.discriminator_kwargs,
         )
 
-        if self.v1 and self.discriminator_kwargs["arch_type"] == "Rnn":
-            print("here", self.device)
-            self.replay_buffer = ReplayBufferZExternalDiscTraj(
-                self.buffer_size,
-                self.max_steps,
-                self.observation_space,
-                self.action_space,
-                self.prior,
-                self.external_disc_shape,
-                self.device,
-                optimize_memory_usage=self.optimize_memory_usage,
-            )
-
-        else:
-            print(self.observation_space)
-            print(self.action_space)
-            if self.external_disc_shape:
-
-                self.replay_buffer = ReplayBufferZExternalDisc(
-                    self.buffer_size,
-                    self.observation_space,
-                    self.action_space,
-                    self.prior,
-                    self.external_disc_shape,
-                    self.device,
-                    optimize_memory_usage=self.optimize_memory_usage,
-                )
-
-            else:
-                self.replay_buffer = ReplayBufferZ(
-                    self.buffer_size,
-                    self.observation_space,
-                    self.action_space,
-                    self.prior,
-                    self.device,
-                    optimize_memory_usage=self.optimize_memory_usage,
-                )
+        self.replay_buffer = ReplayBufferZ (self.buffer_size,self.observation_space,
+                                            self.action_space,self.prior,self.device,
+                                            optimize_memory_usage=self.optimize_memory_usage)
 
         # print(self.policy_class)
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
@@ -355,9 +321,9 @@ class SILIAYN(SAC):
             )
         else:
             # Force conversion to float
-            # this will throw an error if a malformed string (different from 'auto')
-            # is passed
+            # this will throw an error if a malformed string (different from 'auto') is passed
             self.ent_coef_tensor = th.tensor(float(self.ent_coef)).to(self.device)
+
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Update optimizers learning rate
@@ -368,6 +334,14 @@ class SILIAYN(SAC):
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
 
+        if self.num_timesteps >= self.MODEL_SAVE_STEP :
+            now = datetime.now()
+            current_time = now.strftime("%y_%m_%d_%H_%M_%S")
+            kilo_steps = int(self.num_timesteps / 1000)
+            self.save(f"autosave_siliayn_{kilo_steps}k_{current_time}")
+            self.MODEL_SAVE_STEP += self.MODEL_CHKPOINT_PERIOD
+
+
         ent_coef_losses, ent_coefs = deque(maxlen=100), deque(maxlen=100)
         (actor_losses, critic_losses, disc_losses) = (
             deque(maxlen=100),
@@ -377,165 +351,61 @@ class SILIAYN(SAC):
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
-
-            # In v1 we compute the diversity reward here
             # starting by beta
-            if self.v1:
-                betas = np.zeros(self.prior.event_shape[0])
-                for z_idx in range(self.prior.event_shape[0]):
-                    if self.combined_rewards:
-                        mean_true_rewards = [
-                            ep_info.get(f"r_true_{z_idx}")
-                            for ep_info in self.ep_info_buffer
-                        ]
+            betas = np.zeros(self.n_skills)
+            for z_idx in range(self.n_skills):
+                if self.combined_rewards:
+                    mean_true_rewards = [ep_info.get(f"r_true_{z_idx}")
+                                            for ep_info in self.ep_info_buffer]
 
-                        mean_true_reward = safe_mean(
-                            mean_true_rewards, where=~np.isnan(mean_true_rewards)
-                        )
+                    mean_true_reward = safe_mean(mean_true_rewards, where=~np.isnan(mean_true_rewards))
+                    if np.isnan(mean_true_reward):
+                        mean_true_reward = 0.0
 
-                        if np.isnan(mean_true_reward):
-                            mean_true_reward = 0.0
+                    mean_diayn_reward = [ep_info.get(f"r_diayn_{z_idx}")
+                                            for ep_info in self.ep_info_buffer]
+                    mean_diayn_reward = safe_mean(mean_diayn_reward, where=~np.isnan(mean_diayn_reward))
 
-                        mean_diayn_reward = [
-                            ep_info.get(f"r_diayn_{z_idx}")
-                            for ep_info in self.ep_info_buffer
-                        ]
+                    if np.isnan(mean_diayn_reward):
+                        mean_diayn_reward = 0.0
 
-                        mean_diayn_reward = safe_mean(
-                            mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
-                        )
+                    beta = self.beta
+                    betas[z_idx] = beta
 
-                        if np.isnan(mean_diayn_reward):
-                            mean_diayn_reward = 0.0
 
-                        if self.adaptive_beta:
-                            beta = self.adaptive_beta / (np.abs(mean_diayn_reward) + 1)
-                        else:
-                            beta = self.beta
+            replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+            rep = replay_data
+            obs, zs, next_obs, true_reward, dones, actions = (rep.observations, rep.zs,    rep.next_observations,
+                                                              rep.rewards,      rep.dones, rep.actions)
 
-                        if self.smerl:
-                            if self.beta_smooth:
-                                a = self.smerl - np.abs(self.eps * self.smerl)
-                                beta_on = beta * sigm((mean_true_reward - a) / a * 4)
-                            else:
-                                beta_on = float(
-                                    (
-                                        mean_true_reward
-                                        >= self.smerl - np.abs(self.eps * self.smerl)
-                                    )
-                                    * beta
-                                )
+            ep_index = replay_data.ep_index.flatten()
+            len_episodes = th.Tensor(self.len_episodes)[ep_index]
+            # Get or compute vector to pass to the discriminator
 
-                        else:
-                            beta_on = beta
-                        betas[z_idx] = beta_on
+            if isinstance(self.disc_on, DiscriminatorFunction):
+                disc_obs = self.disc_on(replay_data.observations)
+            else:
+                disc_obs = replay_data.observations[:, self.disc_on]
 
-                if self.discriminator_kwargs["arch_type"] == "Rnn":
-                    (
-                        obs_trajs,
-                        action_trajs,
-                        next_obs_trajs,
-                        done_trajs,
-                        reward_trajs,
-                        z_trajs,
-                        disc_trajs,
-                        lenghts,
-                    ) = self.replay_buffer.sample(batch_size)
-                    log_q_phi = self.discriminator(disc_trajs, lenghts).to(self.device)
+            disc_obs = disc_obs.type(th.FloatTensor).to(self.device)
+            # print(disc_obs)
+            log_q_phi = self.discriminator(disc_obs)
+            discriminator_loss = self.discriminator.loss(log_q_phi, zs)
 
-                    diayn_reward = log_q_phi - self.log_p_z[0]
+            diayn_reward = log_q_phi.clone().detach() - self.log_p_z[0]
 
-                    mask = reward_trajs > -np.inf
-
-                    mask = z_trajs > -1
-                    diayn_reward = diayn_reward[mask]
-                    diayn_reward = diayn_reward.view(-1, z_trajs.shape[-1])
-                    obs = obs_trajs[obs_trajs > -np.inf].view((-1, obs_trajs.shape[-1]))
-                    next_obs = next_obs_trajs[next_obs_trajs > -np.inf].view(
-                        (-1, next_obs_trajs.shape[-1])
-                    )
-                    zs = z_trajs[z_trajs > -1].view((-1, z_trajs.shape[-1]))
-                    dones = done_trajs[done_trajs > -1].view((-1, 1))
-                    actions = action_trajs[action_trajs > -np.inf].view(
-                        (-1, action_trajs.shape[-1])
-                    )
-                    disc_obs = disc_trajs[disc_trajs > -np.inf].view(
-                        (-1, disc_trajs.shape[-1])
-                    )
-
-                    if self.combined_rewards:
-                        true_reward = reward_trajs[reward_trajs > -np.inf].view((-1, 1))
-                        betas = th.Tensor(betas) * zs
-                        diayn_reward = diayn_reward * betas
-                    else:
-                        true_reward = 0
-
+            if self.combined_rewards:
+                betas = th.Tensor(betas).to(self.device) * zs
+                diayn_reward = diayn_reward * betas
+                if self.mean_reward:
+                    rewards = (true_reward + diayn_reward.sum(dim=1, keepdim=True)
+                        / len_episodes[:, None])
+                else:
                     rewards = true_reward + diayn_reward.sum(dim=1, keepdim=True)
 
-                    discriminator_loss = self.discriminator.loss(log_q_phi, z_trajs).to(
-                        self.device
-                    )
-
-                else:
-                    replay_data = self.replay_buffer.sample(
-                        batch_size, env=self._vec_normalize_env
-                    )
-                    obs = replay_data.observations
-                    zs = replay_data.zs
-                    next_obs = replay_data.next_observations
-                    true_reward = replay_data.rewards
-                    dones = replay_data.dones
-                    actions = replay_data.actions
-
-                    ep_index = replay_data.ep_index.flatten()
-                    len_episodes = th.Tensor(self.len_episodes)[ep_index]
-                    # Get or compute vector to pass to the discriminator
-
-                    if isinstance(self.disc_on, DiscriminatorFunction):
-                        if self.external_disc_shape:
-                            disc_obs = self.disc_on(replay_data.disc_obs)
-                        else:
-                            disc_obs = self.disc_on(replay_data.observations)
-                    else:
-                        if self.external_disc_shape:
-                            disc_obs = replay_data.disc_obs[:, self.disc_on]
-                        else:
-                            disc_obs = replay_data.observations[:, self.disc_on]
-
-                    log_q_phi = self.discriminator(disc_obs)
-                    discriminator_loss = self.discriminator.loss(log_q_phi, zs)
-
-                    diayn_reward = log_q_phi.clone().detach() - self.log_p_z[0]
-
-                    if self.combined_rewards:
-                        betas = th.Tensor(betas) * zs
-                        diayn_reward = diayn_reward * betas
-                        if self.mean_reward:
-                            rewards = (
-                                true_reward
-                                + diayn_reward.sum(dim=1, keepdim=True)
-                                / len_episodes[:, None]
-                            )
-                        else:
-                            rewards = true_reward + diayn_reward.sum(
-                                dim=1, keepdim=True
-                            )
-
-                    else:
-                        diayn_reward = diayn_reward * zs
-                        rewards = diayn_reward.sum(dim=1, keepdim=True)
-
             else:
-
-                replay_data = self.replay_buffer.sample(
-                    batch_size, env=self._vec_normalize_env
-                )
-                obs = replay_data.observations
-                zs = replay_data.zs
-                next_obs = replay_data.next_observations
-                rewards = replay_data.rewards
-                dones = replay_data.dones
-                actions = replay_data.actions
+                diayn_reward = diayn_reward * zs
+                rewards = diayn_reward.sum(dim=1, keepdim=True)
 
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
@@ -543,7 +413,6 @@ class SILIAYN(SAC):
 
             # Action by the current actor for the sampled state
             # We concatenate state with current one hot encoded skill
-
             obs = th.cat([obs, zs], dim=1)
 
             actions_pi, log_prob = self.actor.action_log_prob(obs)
@@ -590,12 +459,8 @@ class SILIAYN(SAC):
 
             current_q_values = self.critic(obs, actions)
             # Compute critic loss
-            critic_loss = 0.5 * sum(
-                [
-                    F.mse_loss(current_q, target_q_values)
-                    for current_q in current_q_values
-                ]
-            )
+            critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values)
+                                            for current_q in current_q_values])
             critic_losses.append(critic_loss.item())
 
             # Optimize the critic
@@ -622,35 +487,6 @@ class SILIAYN(SAC):
                     self.critic.parameters(), self.critic_target.parameters(), self.tau
                 )
 
-            if not self.v1:
-                if self.discriminator_kwargs["arch_type"] == "Rnn":
-                    trajs, z_trajs, lenghts = self.replay_buffer.sample_trajectories(
-                        batch_size, disc_only=True
-                    )
-                    log_q_phi = self.discriminator(trajs, th.Tensor(lenghts)).to(
-                        self.device
-                    )
-                    discriminator_loss = self.discriminator.loss(
-                        log_q_phi, th.Tensor(z_trajs).to(self.device)
-                    )
-
-                else:
-                    if self.external_disc_shape:
-                        disc_obs = replay_data.disc_obs
-
-                    else:
-                        # Get or compute vector to pass to the discriminator
-                        if isinstance(self.disc_on, DiscriminatorFunction):
-                            disc_obs = self.disc_on(replay_data.observations)
-                        else:
-                            disc_obs = replay_data.observations[:, self.disc_on]
-
-                    log_q_phi = self.discriminator(disc_obs.to(self.device)).to(
-                        self.device
-                    )
-                    z = zs.to(self.device)
-                    discriminator_loss = self.discriminator.loss(log_q_phi, z)
-
             disc_losses.append(discriminator_loss.item())
             self.discriminator.optimizer.zero_grad()
             discriminator_loss.backward()
@@ -667,6 +503,8 @@ class SILIAYN(SAC):
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
+
+
     def learn(
         self,
         total_timesteps: int,
@@ -681,7 +519,6 @@ class SILIAYN(SAC):
     ) -> "OffPolicyAlgorithm":
 
         self.len_episodes = np.zeros(total_timesteps)
-
         total_timesteps, callback = self._setup_learn(
             total_timesteps,
             eval_env,
@@ -700,6 +537,8 @@ class SILIAYN(SAC):
         while self.num_timesteps < total_timesteps:
             # sample skill z according to prior before generating episode
             z = self.prior.sample().to(self.device)
+            z_idx = np.argmax(z.cpu())
+
             rollout = self.collect_rollouts(
                 self.env,
                 train_freq=self.train_freq,
@@ -723,9 +562,182 @@ class SILIAYN(SAC):
                 )
 
                 self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
+                self.train_sil(z_idx)
 
         callback.on_training_end()
         return self
+
+
+    ######### SIL PART #########
+    ######### SIL PART #########
+    ######### SIL PART #########
+    ######### SIL PART #########
+    ######### SIL PART #########
+
+    def _sil_setup_model(self) -> None:
+        self.replay_buffer_skill = []
+        self.running_episodes = [[] for _ in range(self.n_skills)]
+        self.skill_coeff = 1e-2
+        # print(self.observation_space.shape)
+        self.sil_buffer_size = 4096
+        self.sil_batch_size = 64
+        self.one_hot_list = F.one_hot(th.arange(0, self.n_skills))
+        
+        now = datetime.now()
+        current_time = now.strftime("%y_%m_%d_%H_%M_%S")
+        self.file_name = f"skill_logger_SILIAYN_{current_time}.csv"
+
+        file_handler = open(self.file_name, "at")
+        file_handler.write("#{}\n")
+        skill_logger = csv.DictWriter(file_handler, fieldnames=("timestep", "z", "prob"))
+        skill_logger.writeheader()
+        file_handler.flush()
+        file_handler.close()
+
+        np.set_printoptions(precision = 4)
+        
+        for i in range(self.n_skills):
+            new_skill_replay_buffer = SilReplayBuffer (self.sil_buffer_size)
+            self.replay_buffer_skill.append(new_skill_replay_buffer)
+
+    def step_sil(self, obs, n_obs, action, reward, done, z):
+        # print("SKILL: {}".format(z_idx))
+        z_idx = z.argmax()
+        self.running_episodes[z_idx].append([obs, n_obs, action, reward])
+        if done:
+            self.update_buffer(self.running_episodes[z_idx], z)
+            self.running_episodes[z_idx] = []
+
+    def update_buffer(self, trajectory, z):
+        # positive_reward = False
+        # for (ob, n_ob, a, r) in trajectory:
+        #     if r > 0:
+        #         positive_reward = True
+        #         break
+        # print(trajectory)
+        # if positive_reward:
+        self.add_episode(trajectory, z)
+
+    def add_episode(self, trajectory, z):
+        z_idx = z.argmax()
+        obs, n_obs, actions, rewards, dones = [], [], [], [], []
+        for (ob, n_ob, action, reward) in trajectory:
+            ob_concat   = np.concatenate([ob, z[None]], axis=1)
+            # print(n_ob.shape)
+            # n_ob_concat = np.concatenate([n_ob, z[None]], axis=1)
+            obs.append(ob_concat)
+            # n_obs.append(n_ob_concat)
+            actions.append(action)
+            rewards.append(reward)
+            dones.append(False)
+        dones[len(dones) - 1] = True
+        returns = self.discount_with_dones(rewards, dones, self.gamma)
+        # print("ADD Episode:")
+        # print(returns)
+
+        file_handler = open(self.file_name, "at")
+        skill_logger = csv.DictWriter(file_handler, fieldnames=("timestep", "z", "prob"))
+        skill_logger.writerow( { "timestep": self.num_timesteps, "z":z_idx, "prob": list(self.prior.probs.numpy())})
+        file_handler.flush()
+
+
+        for (ob, action, R, done) in list(zip(obs, actions, returns, dones)):
+            self.replay_buffer_skill[z_idx].add(ob, action, R)
+
+    def discount_with_dones(self, rewards, dones, gamma):
+        discounted = []
+        r = 0
+        for reward, done in zip(rewards[::-1], dones[::-1]):
+            r = reward + gamma * r * (1. - done)
+            discounted.append(r)
+        return discounted[::-1]
+
+
+    def train_sil(self,z_idx):
+        # for n in range(self.args.n_update):
+        # self.replay_buffer_skill[z_idx].sample(self.batch_size)
+        if( len(self.replay_buffer_skill[z_idx]) < self.sil_batch_size): return
+        obs, actions, returns = self.replay_buffer_skill[z_idx].sample(self.sil_batch_size)
+        num_samples = self.sil_batch_size
+
+        mean_adv, num_valid_samples = 0, 0
+
+        if obs is not None:
+            # need to get the masks
+            # get basic information of network..
+            obs         = th.tensor(obs,     dtype=th.float32).reshape(self.sil_batch_size, -1).to(self.device)
+            actions     = th.tensor(actions, dtype=th.float32).reshape(self.sil_batch_size, -1).to(self.device)
+            returns     = th.tensor(returns, dtype=th.float32).reshape(self.sil_batch_size, -1).to(self.device)
+
+            # n_actions_pi, log_prob    = self.actor.action_log_prob(n_obs)
+            # next_critic_value = th.cat(self.critic_target(n_obs, n_actions_pi), dim=1)
+            # next_critic_value, _ = th.min(critic_value, dim=1, keepdim=True)
+            # critic_value = rewards + self.gamma * next_critic_value
+
+            actions_pi, log_prob    = self.actor.action_log_prob(obs)
+            critic_value = th.cat(self.critic(obs, actions_pi), dim=1)
+            critic_value, _ = th.min(critic_value, dim=1, keepdim=True)
+
+            advantages = returns - critic_value
+            mask    = (advantages.cpu().detach().numpy() > 0).astype(np.float32)
+            mask    = th.tensor(mask, dtype=th.float32).to(self.device)
+            returns      *= mask
+            critic_value *= mask
+
+            critic_loss = F.mse_loss(returns, critic_value)
+            VAL_COEFF = 0.05
+            critic_loss *= 0.5 * VAL_COEFF / num_samples
+
+
+
+            # print("Update for SIL part: SKILL {}".format(z_idx))
+            # print("VALUE")
+            # print(critic_loss)
+
+            self.critic.optimizer.zero_grad()
+            critic_loss.backward(retain_graph=True)   # Update critic
+            self.critic.optimizer.step()
+
+            critic_value     = th.cat(self.critic.forward(obs, actions), dim=1)
+            critic_value, _  = th.min(critic_value*mask, dim=1, keepdim=True)
+            adv              = returns*mask - critic_value
+            actor_loss       = adv.mean()
+
+            # print("ACTOR")
+            # print(actor_loss)
+
+            self.actor.optimizer.zero_grad()
+            actor_loss.backward()  # Update actor
+            self.actor.optimizer.step()
+            # print(returns.view(-1))
+            # print(adv.view(-1))
+            # print(advantages.view(-1)*mask)
+
+
+            z = self.one_hot_list[z_idx]
+            skill_adv = -self.prior.log_prob(z) * actor_loss.detach().cpu()
+            new_prob = self.prior.probs + z * self.skill_coeff * skill_adv
+            print("DIFF:")
+            print(z * self.skill_coeff * skill_adv)
+            # print(actor_loss.detach().cpu())
+            SKILL_EPS = 0.01 * (1/self.n_skills * th.ones(self.n_skills))
+            new_prob += SKILL_EPS
+            new_prob = new_prob / sum(new_prob)
+            self.prior = th.distributions.OneHotCategorical(probs = new_prob)
+            print("Update skill probability:")
+            print(self.prior.probs)
+
+        return 
+
+
+
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+    ####### SIL PART ENDS #######
+
+
 
     def collect_rollouts(
         self,
@@ -771,6 +783,8 @@ class SILIAYN(SAC):
 
         callback.on_rollout_start()
         continue_training = True
+
+        self.z_idx = z.argmax()
         while should_collect_more_steps(
             train_freq, num_collected_steps, num_collected_episodes
         ):
@@ -781,8 +795,7 @@ class SILIAYN(SAC):
             observed_episode_reward = 0.0
             while not done:
 
-                if (
-                    self.use_sde
+                if (self.use_sde
                     and self.sde_sample_freq > 0
                     and num_collected_steps % self.sde_sample_freq == 0
                 ):
@@ -800,100 +813,32 @@ class SILIAYN(SAC):
                     new_obs = new_obs["observation"]
                 else:
                     new_obs, true_reward, done, infos = env.step(action)
+                true_reward *=10 
                 done = done[0]
 
                 # get the observation of the discriminator
-                if self.external_disc_shape:
-                    disc_obs = callback.on_step()
+                if isinstance(self.disc_on, DiscriminatorFunction):
+                    disc_obs = self.disc_on(new_obs)
                 else:
-                    if isinstance(self.disc_on, DiscriminatorFunction):
-                        disc_obs = self.disc_on(new_obs)
-                    else:
-                        disc_obs = new_obs[:, self.disc_on]
+                    disc_obs = new_obs[:, self.disc_on]
 
                 # compute the forward pass of the discriminator
                 z_idx = np.argmax(z.cpu())
-
-                if self.discriminator_kwargs["arch_type"] == "Rnn":
-                    disc_traj, lenght = replay_buffer.get_current_traj()
-                    lenght = int(lenght) + 1
-                    disc_traj[lenght - 1] = th.Tensor(disc_obs)
-                    out = self.discriminator(disc_traj[None, :, :], th.Tensor([lenght]))
-                    log_q_phi = out[:, lenght - 1, z.argmax()].detach().cpu().numpy()
-
-                else:
-                    log_q_phi = (
-                        self.discriminator(disc_obs)[:, z.argmax()]
-                        .detach()
-                        .cpu()
-                        .numpy()
-                    )
+                # print(disc_obs.shape)
+                log_q_phi = (self.discriminator(disc_obs)[:, z_idx].detach().cpu().numpy())
 
                 if isinstance(self.log_p_z, th.Tensor):
                     self.log_p_z = self.log_p_z.cpu().numpy()
 
                 # compute diversity reward
-                diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
-
                 # beta update and logging
-
+                diayn_reward = log_q_phi - self.log_p_z[z.argmax()]
                 if self.combined_rewards:
-                    if self.beta == "auto":
-
-                        pass
-
-                    elif self.smerl:
-                        mean_true_reward = [
-                            ep_info.get(f"r_true_{z_idx}")
-                            for ep_info in self.ep_info_buffer
-                        ]
-
-                        mean_true_reward = safe_mean(
-                            mean_true_reward, where=~np.isnan(mean_true_reward)
-                        )
-
-                        mean_diayn_reward = [
-                            ep_info.get(f"r_diayn_{z_idx}")
-                            for ep_info in self.ep_info_buffer
-                        ]
-
-                        mean_diayn_reward = safe_mean(
-                            mean_diayn_reward, where=~np.isnan(mean_diayn_reward)
-                        )
-
-                        if np.isnan(mean_true_reward):
-                            mean_true_reward = 0.0
-
-                        if np.isnan(mean_diayn_reward):
-                            mean_diayn_reward = 0.0
-
-                        if self.adaptive_beta:
-                            beta = self.adaptive_beta / (1 + np.abs(mean_diayn_reward))
-                        else:
-                            beta = self.beta
-
-                        if self.beta_smooth:
-                            a = self.smerl - np.abs(self.eps * self.smerl)
-                            beta_on = beta * sigm((mean_true_reward - a) / a * 4)
-                        else:
-                            beta_on = float(
-                                (
-                                    mean_true_reward
-                                    >= self.smerl - np.abs(self.eps * self.smerl)
-                                )
-                                * beta
-                            )
-
-                        betas = self.beta_buffer[-1].copy()
-                        betas[z_idx] = beta_on
-                        self.beta_buffer.append(betas)
-                        # add beta*diayn_reward if mean_reward is closer than espilon*smerl to smerl
-                        reward = diayn_reward * beta_on + true_reward
-                    else:
-                        reward = beta * diayn_reward + true_reward
+                    reward = self.beta * diayn_reward + true_reward
 
                 else:
                     reward = diayn_reward
+
 
                 self.num_timesteps += 1
                 episode_timesteps += 1
@@ -917,11 +862,10 @@ class SILIAYN(SAC):
                 observed_episode_reward += reward
 
                 # Retrieve reward and episode length if using Monitor wrapper
-
                 for idx, info in enumerate(infos):
                     maybe_ep_info = info.get("episode")
                     if maybe_ep_info:
-                        for i in range(self.prior.event_shape[0]):
+                        for i in range(self.n_skills):
                             maybe_ep_info[f"r_true_{i}"] = np.nan
 
                             maybe_ep_info[f"r_diayn_{i}"] = np.nan
@@ -938,57 +882,22 @@ class SILIAYN(SAC):
 
                 # Store data in replay buffer (normalized action and unnormalized observation)
                 z_store = z.clone().detach().cpu().numpy()
-                if self.v1:
-                    reward = true_reward
-
-                if not self.external_disc_shape:
-                    disc_obs = None
-
-                if disc_obs is None:
-
-                    self._store_transition(
-                        replay_buffer,
-                        buffer_action,
-                        new_obs,
-                        reward,
-                        done,
-                        infos,
-                        z_store,
-                    )
-
-                else:
-                    self._store_transition(
-                        replay_buffer,
-                        buffer_action,
-                        new_obs,
-                        reward,
-                        done,
-                        infos,
-                        z_store,
-                        disc_obs,
-                    )
-
-                self._update_current_progress_remaining(
-                    self.num_timesteps, self._total_timesteps
-                )
-
-                # For DQN, check if the target network should be updated
-                # and update the exploration schedule
-                # For SAC/TD3, the update is done as the same time as the gradient update
-                # see https://github.com/hill-a/stable-baselines/issues/900
+                # reward = true_reward
+                self._store_transition(replay_buffer, buffer_action, new_obs, reward, done, infos, z_store)
+                self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
                 self._on_step()
 
-                if not should_collect_more_steps(
-                    train_freq, num_collected_steps, num_collected_episodes
-                ):
-                    break
+                # if not should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
+                #     break
 
             if done:
+                # print(self._episode_num)
                 self.len_episodes[self._episode_num] = num_collected_steps
                 num_collected_episodes += 1
                 self._episode_num += 1
                 diayn_episode_rewards.append(diayn_episode_reward)
                 total_timesteps.append(episode_timesteps)
+                print("Skill is {}".format(z.argmax()))
 
                 if action_noise is not None:
                     action_noise.reset()
@@ -996,6 +905,9 @@ class SILIAYN(SAC):
                 # Log training infos
                 if log_interval is not None and self._episode_num % log_interval == 0:
                     self._dump_logs()
+
+
+        print(f"Episode {self._episode_num}: Returns {true_episode_reward}")
 
         diayn_mean_reward = (
             np.mean(diayn_episode_rewards) if num_collected_episodes > 0 else 0.0
@@ -1018,7 +930,6 @@ class SILIAYN(SAC):
         done: np.ndarray,
         infos: List[Dict[str, Any]],
         z: np.ndarray,
-        disc_obs: Optional[np.ndarray] = None,
     ) -> None:
         """
         Store transition in the replay buffer.
@@ -1057,28 +968,11 @@ class SILIAYN(SAC):
                 next_obs = self._vec_normalize_env.unnormalize_obs(next_obs)
         else:
             next_obs = new_obs_
-        if disc_obs is not None:
-            replay_buffer.add(
-                self._last_original_obs,
-                next_obs,
-                buffer_action,
-                reward_,
-                done,
-                z,
-                disc_obs,
-                self._episode_num,
-            )
 
-        else:
-            replay_buffer.add(
-                self._last_original_obs,
-                next_obs,
-                buffer_action,
-                reward_,
-                done,
-                z,
-                self._episode_num,
-            )
+        # print(reward_)
+
+        replay_buffer.add(self._last_original_obs, next_obs, buffer_action, reward_, done, z, self._episode_num,)
+        self.step_sil    (self._last_original_obs, next_obs, buffer_action, reward_, done, z)
 
         self._last_obs = new_obs
         # Save the unnormalized observation
@@ -1213,6 +1107,7 @@ class SILIAYN(SAC):
         model.__dict__.update(data)
         model.__dict__.update(kwargs)
         model._setup_model()
+        model._sil_setup_model()
 
         # put state_dicts back in place
         model.set_parameters(params, exact_match=exact_match, device=device)
@@ -1252,7 +1147,7 @@ class SILIAYN(SAC):
                 safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]),
             )
 
-            for i in range(self.prior.event_shape[0]):
+            for i in range(self.n_skills):
 
                 mean_diayn_reward = np.array(
                     [ep_info.get(f"r_diayn_{i}") for ep_info in self.ep_info_buffer]
@@ -1325,3 +1220,66 @@ class SILIAYN(SAC):
         else:
             saved_pytorch_variables.append("ent_coef_tensor")
         return state_dicts, saved_pytorch_variables
+
+
+######## Sil Data Structures ########
+######## Sil Data Structures ########
+######## Sil Data Structures ########
+
+class SilReplayBuffer(object):
+    def __init__(self, size):
+        """Create Prioritized Replay buffer.
+        Parameters
+        ----------
+        size: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        """
+        self._storage = []
+        self._maxsize = size
+        self._next_idx = 0
+
+    def __len__(self):
+        return len(self._storage)
+    
+    def add(self, obs_t, action, R):
+        data = (obs_t, action, R)
+
+        if self._next_idx >= len(self._storage):
+            self._storage.append(data)
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+    def _encode_sample(self, idxes):
+        obses_t, actions, returns= [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, R = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            returns.append(R)
+        return np.array(obses_t), np.array(actions), np.array(returns)
+
+    def sample(self, batch_size):
+        """Sample a batch of experiences.
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+        Returns
+        -------
+        obs_batch: np.array
+            batch of observations
+        act_batch: np.array
+            batch of actions executed given obs_batch
+        rew_batch: np.array
+            rewards received as results of executing act_batch
+        next_obs_batch: np.array
+            next set of observations seen after executing act_batch
+        done_mask: np.array
+            done_mask[i] = 1 if executing act_batch[i] resulted in
+            the end of an episode and 0 otherwise.
+        """
+        idxes = [random.randint(0, len(self._storage) - 1) for _ in range(batch_size)]
+        return self._encode_sample(idxes)

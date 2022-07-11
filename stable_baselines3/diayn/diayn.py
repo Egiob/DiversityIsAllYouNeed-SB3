@@ -2,6 +2,8 @@ import io
 import pathlib
 import sys
 import time
+import csv
+from datetime import datetime
 from collections import deque
 from logging import log
 from types import FunctionType as function
@@ -146,7 +148,7 @@ class DIAYN(SAC):
         discriminator_kwargs: dict = {},
         external_disc_shape: np.ndarray = None,
         combined_rewards: bool = False,
-        beta: float = None,
+        beta: float = 1,
         smerl: int = None,
         eps: float = 0.05,
         beta_temp: float = 20.0,
@@ -359,6 +361,22 @@ class DIAYN(SAC):
             # is passed
             self.ent_coef_tensor = th.tensor(float(self.ent_coef)).to(self.device)
 
+        now = datetime.now()
+        current_time = now.strftime("%y_%m_%d_%H_%M_%S")
+        self.file_name = f"skill_logger_DIAYN_{current_time}.csv"
+
+        file_handler = open(self.file_name, "at")
+        file_handler.write("#{}\n")
+        skill_logger = csv.DictWriter(file_handler, fieldnames=("timestep", "z"))
+        skill_logger.writeheader()
+        file_handler.flush()
+        file_handler.close()
+
+
+
+
+
+
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Update optimizers learning rate
         optimizers = [self.actor.optimizer, self.critic.optimizer]
@@ -508,7 +526,7 @@ class DIAYN(SAC):
                     diayn_reward = log_q_phi.clone().detach() - self.log_p_z[0]
 
                     if self.combined_rewards:
-                        betas = th.Tensor(betas) * zs
+                        betas = th.Tensor(betas).to(self.device) * zs
                         diayn_reward = diayn_reward * betas
                         if self.mean_reward:
                             rewards = (
@@ -616,7 +634,7 @@ class DIAYN(SAC):
             actor_loss.backward()
             self.actor.optimizer.step()
 
-            print("CRITIC LOSS")
+            print("DIAYN: CRITIC LOSS")
             print(critic_loss)
             print("ACTOR LOSS")
             print(actor_loss)
@@ -844,7 +862,6 @@ class DIAYN(SAC):
 
                 if self.combined_rewards:
                     if self.beta == "auto":
-
                         pass
 
                     elif self.smerl:
@@ -895,7 +912,7 @@ class DIAYN(SAC):
                         # add beta*diayn_reward if mean_reward is closer than espilon*smerl to smerl
                         reward = diayn_reward * beta_on + true_reward
                     else:
-                        reward = beta * diayn_reward + true_reward
+                        reward = self.beta * diayn_reward + true_reward
 
                 else:
                     reward = diayn_reward
@@ -1006,6 +1023,10 @@ class DIAYN(SAC):
             np.mean(diayn_episode_rewards) if num_collected_episodes > 0 else 0.0
         )
         callback.on_rollout_end()
+        file_handler = open(self.file_name, "at")
+        skill_logger = csv.DictWriter(file_handler, fieldnames=("timestep", "z"))
+        skill_logger.writerow( { "timestep": self.num_timesteps, "z":z_idx.data})
+        file_handler.flush()
         return RolloutReturnZ(
             diayn_mean_reward,
             num_collected_steps,
@@ -1013,6 +1034,7 @@ class DIAYN(SAC):
             continue_training,
             z=z,
         )
+
 
     def _store_transition(
         self,
